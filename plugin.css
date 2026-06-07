@@ -1,0 +1,118 @@
+I have everything I need. Now I'll produce the standalone plugin.css using Thymer core tokens that exist on all themes.
+
+```css
+/* Templater v2 — modal styles (Thymer core theme tokens; safe on ALL themes) */
+
+.tmpl-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tmpl-modal {
+  background: var(--cards-bg);
+  color: var(--color-text-400);
+  border: 1px solid var(--cards-border-color);
+  border-radius: 12px;
+  padding: 20px 22px;
+  min-width: 460px;
+  max-width: 720px;
+  max-height: 80vh;
+  overflow-y: auto;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.25);
+  font-family: var(--font-family, -apple-system, sans-serif);
+}
+
+.tmpl-modal h2 {
+  margin: 0 0 6px;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--color-text-400);
+}
+
+.tmpl-modal .tmpl-sub {
+  color: var(--color-text-600);
+  font-size: 12px;
+  margin-bottom: 16px;
+}
+
+.tmpl-field {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 14px;
+}
+
+.tmpl-field label {
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 4px;
+  color: var(--color-text-600);
+}
+
+.tmpl-field input,
+.tmpl-field textarea {
+  background: var(--input-bg-color);
+  color: var(--color-text-400);
+  border: 1px solid var(--cards-border-color);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.tmpl-field textarea {
+  min-height: 60px;
+  resize: vertical;
+}
+
+.tmpl-field input:focus,
+.tmpl-field textarea:focus {
+  outline: none;
+  border-color: #10b981;
+}
+
+.tmpl-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.tmpl-btn {
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  border: 1px solid var(--cards-border-color);
+  background: var(--input-bg-color);
+  color: var(--color-text-400);
+}
+
+.tmpl-btn.primary {
+  background: var(--button-primary-bg-color, #10b981);
+  color: var(--button-primary-fg-color, #fff);
+  border-color: var(--button-primary-bg-color, #10b981);
+}
+
+.tmpl-btn:hover {
+  filter: brightness(1.05);
+}
+
+.tmpl-preview {
+  background: var(--color-bg-900);
+  color: var(--color-text-400);
+  border: 1px solid var(--cards-border-color);
+  border-radius: 6px;
+  padding: 12px 14px;
+  font-family: ui-monospace, SF Mono, Menlo, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  max-height: 50vh;
+  overflow-y: auto;
+  margin-bottom: 12px;
+}
+```
