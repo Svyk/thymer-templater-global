@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.0.0 loaded — global AppPlugin', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.0.1 loaded — global AppPlugin', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -902,10 +902,12 @@ class Plugin extends AppPlugin {
       targetCollection = activeCollection;
       // Update-mode rename: PluginRecord has no setName. Only a Name/Title text PROPERTY
       // can be written; if none exists, update-mode cannot rename — we skip silently.
+      // When update-mode sets the title, drop the title line from the body too (it now lives
+      // as the record name). Append-mode keeps it (the record's own name is left untouched).
       if (updateMode) {
         await this.trySetRecordTitle(targetRecord, title);
+        bodyForWrite = this.stripTitleLine(bodyAll, titleLineRaw);
       }
-      // Keep the title line as body content in append/update (the record already has a name).
     } else {
       // CREATE: new record in trigger-named collection, or the active collection.
       targetCollection = await this.resolveTargetCollection(triggers, activeCollection);
@@ -1128,9 +1130,13 @@ class Plugin extends AppPlugin {
     const lines = body.split('\n');
     // Track parents per indent LEVEL so nested bullets nest correctly. Indent is normalized
     // to a level (2 spaces or 1 tab = one level) before the stack comparison, so 2-space and
-    // 4-space markdown both nest to the author's intent. afterItem is always null — sibling
-    // order is the insertion order of createLineItem calls, which Thymer preserves.
+    // 4-space markdown both nest to the author's intent. createLineItem(parent, null, ...)
+    // PREPENDS at the parent's start, so each new sibling lands ABOVE the previous one and the
+    // whole body renders REVERSED. To append in author order, pass the previous sibling under
+    // the same parent as afterItem. lastChildOf maps a parent (or ROOT) -> its last inserted child.
     const stack = []; // [{level, item}]
+    const ROOT = {};
+    const lastChildOf = new Map();
     for (const raw of lines) {
       if (!raw.trim()) continue;
       const indentMatch = raw.match(/^([\t ]*)/);
@@ -1180,15 +1186,19 @@ class Plugin extends AppPlugin {
       }
 
       const segments = this.parseInlineSegments(content);
+      const parentKey = parentItem || ROOT;
+      const afterItem = lastChildOf.get(parentKey) || null;
       let created = null;
       try {
-        // parentItem is a PluginLineItem OBJECT (or null); afterItem null = append in order.
-        created = await record.createLineItem(parentItem, null, type, segments, props);
+        // parentItem + afterItem are PluginLineItem OBJECTS (or null). afterItem = the previous
+        // sibling under this parent, so lines append in author order instead of reversing.
+        created = await record.createLineItem(parentItem, afterItem, type, segments, props);
       } catch (e) {
         console.warn('[Templater] createLineItem failed for', type, line, e);
       }
-      if (created && nestable) {
-        stack.push({ level, item: created });
+      if (created) {
+        lastChildOf.set(parentKey, created);
+        if (nestable) stack.push({ level, item: created });
       }
     }
   }
@@ -1200,9 +1210,15 @@ class Plugin extends AppPlugin {
   parseInlineSegments(line) {
     const str = String(line || "");
     const segments = [];
-    // Composite: sentinel marker OR an inline #hashtag.
+    // Composite, in priority order: sentinel marker (1,2) | **bold** (3) | `code` (4) |
+    // *italic* (5) | inline #hashtag (6). Bold is matched before italic so `**` is consumed
+    // as one token, not two italics. Non-greedy inner classes keep each token bounded.
     const re = new RegExp(
-      M_OPEN + "(REF|TAG|DATE)" + M_SEP + "([^" + M_CLOSE + "]*)" + M_CLOSE + "|(#[^\\s#" + M_OPEN + M_SEP + M_CLOSE + "]+)",
+      M_OPEN + "(REF|TAG|DATE)" + M_SEP + "([^" + M_CLOSE + "]*)" + M_CLOSE +
+      "|\\*\\*([^*]+?)\\*\\*" +
+      "|`([^`]+)`" +
+      "|\\*([^*]+?)\\*" +
+      "|(#[^\\s#" + M_OPEN + M_SEP + M_CLOSE + "]+)",
       "g"
     );
     let last = 0, m;
@@ -1223,7 +1239,13 @@ class Plugin extends AppPlugin {
         // datetime segment — text is a Thymer-parseable date string ("today","tomorrow",ISO).
         segments.push({ type: 'datetime', text: m[2] });
       } else if (m[3] !== undefined) {
-        segments.push({ type: 'hashtag', text: m[3] });
+        segments.push({ type: 'bold', text: m[3] });
+      } else if (m[4] !== undefined) {
+        segments.push({ type: 'code', text: m[4] });
+      } else if (m[5] !== undefined) {
+        segments.push({ type: 'italic', text: m[5] });
+      } else if (m[6] !== undefined) {
+        segments.push({ type: 'hashtag', text: m[6] });
       }
       last = m.index + m[0].length;
     }
