@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.0.1 loaded — global AppPlugin', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.0.2 loaded — global AppPlugin', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -316,32 +316,71 @@ class Plugin extends AppPlugin {
     } catch (e) { console.warn('[Templater] invalid Variables JSON, ignoring:', e); }
     if (!vars.defaults) vars.defaults = {};
 
-    const prompts = this.collectPrompts(content, vars.defaults);
     const panel = this.ui.getActivePanel && this.ui.getActivePanel();
     const activeRecord = panel && panel.getActiveRecord && panel.getActiveRecord();
     const activeCollection = panel && panel.getActiveCollection && panel.getActiveCollection();
+    const triggers = this.tTriggers(template);
+    const appendMode = triggers.some(t => /^append to current record$/i.test(t));
+    const updateMode = triggers.some(t => /^update current record$/i.test(t));
 
-    const finalize = async (promptValues) => {
-      let rendered;
-      try {
-        rendered = await this.renderTemplate(content, {
-          record: activeRecord,
-          collection: activeCollection,
-          prompts: promptValues || {},
-          vars: vars.defaults || {},
-          empty: vars.empty || "skip",
-          templateName: this.tName(template),
-        });
-      } catch (e) {
-        console.error('[Templater] render failed:', e);
-        this.toast("Templater", "Render failed: " + (e && e.message || e));
-        return;
-      }
-      this.openPreview(template, rendered);
+    // Flow: [pick collection] -> fill prompts -> create + fill + open. No preview step.
+    const proceed = (chosenCollection) => {
+      const prompts = this.collectPrompts(content, vars.defaults);
+      const finalize = async (promptValues) => {
+        let rendered;
+        try {
+          rendered = await this.renderTemplate(content, {
+            record: activeRecord,
+            collection: chosenCollection || activeCollection,
+            prompts: promptValues || {},
+            vars: vars.defaults || {},
+            empty: vars.empty || "skip",
+            templateName: this.tName(template),
+          });
+        } catch (e) {
+          console.error('[Templater] render failed:', e);
+          this.toast("Templater", "Render failed: " + (e && e.message || e));
+          return;
+        }
+        try {
+          await this.applyTemplate(template, rendered, { collection: chosenCollection });
+        } catch (e) {
+          console.error('[Templater] apply failed:', e);
+          this.toast("Apply failed", String(e && e.message || e));
+        }
+      };
+      if (!prompts.length) finalize({});
+      else this.openPromptsModal(template, prompts, finalize);
     };
 
-    if (!prompts.length) finalize({});
-    else this.openPromptsModal(template, prompts, finalize);
+    // Append/Update operate on the active record — no collection choice.
+    if (appendMode || updateMode) { proceed(null); return; }
+    // Create mode: a Trigger may pin a collection; otherwise ask which collection.
+    const pinned = await this.resolveTargetCollection(triggers, null);
+    if (pinned) { proceed(pinned); return; }
+    this.openCollectionPicker((col) => proceed(col));
+  }
+
+  // Searchable target-collection picker (Thymer-native dropdown — spaces work in its input).
+  // Calls onPick(collection) on selection; does nothing if dismissed (callback style, no hang).
+  openCollectionPicker(onPick) {
+    this.data.getAllCollections().then(all => {
+      const cols = (all || []).filter(c => {
+        const n = c && c.getName && c.getName();
+        return n && n !== TEMPLATES_COLL && AUDIT_COLL_CANDIDATES.indexOf(n) === -1;
+      });
+      cols.sort((a, b) => (a.getName() || "").localeCompare(b.getName() || ""));
+      const options = cols.map(c => ({ label: c.getName(), icon: "ti-folder", onSelected: () => onPick(c) }));
+      const panel = this.ui.getActivePanel && this.ui.getActivePanel();
+      const anchor = (panel && panel.getElement && panel.getElement()) || document.body;
+      try {
+        this.ui.createDropdown({ attachedTo: anchor, options, width: 380, inputPlaceholder: "Create in which collection?" });
+      } catch (e) {
+        this.asyncSuggester("Create in which collection?", cols.map(c => c.getName())).then(idx => {
+          if (idx >= 0 && cols[idx]) onPick(cols[idx]);
+        });
+      }
+    }).catch(e => console.warn('[Templater] collection picker failed:', e));
   }
 
   // ========================================================================
@@ -671,6 +710,7 @@ class Plugin extends AppPlugin {
       const input = document.createElement('input');
       input.type = 'text';
       input.value = dflt || "";
+      this.attachInputGuards(input);
       wrap.appendChild(input);
       modal.appendChild(wrap);
       const actions = document.createElement('div');
@@ -776,6 +816,7 @@ class Plugin extends AppPlugin {
       wrap.innerHTML = `<label>${this.escape(label)}</label>${isLong ? '<textarea></textarea>' : '<input type="text" />'}`;
       const input = wrap.querySelector('input, textarea');
       if (defaultValue) input.value = defaultValue;
+      this.attachInputGuards(input);
       fields.push({ label, input });
       modal.appendChild(wrap);
     });
@@ -872,7 +913,7 @@ class Plugin extends AppPlugin {
   // Apply — title + frontmatter -> properties + nested body line items + audit
   // ========================================================================
 
-  async applyTemplate(template, rendered) {
+  async applyTemplate(template, rendered, opts) {
     const triggers = this.tTriggers(template);
     const panel = this.ui.getActivePanel && this.ui.getActivePanel();
     const activeRecord = panel && panel.getActiveRecord && panel.getActiveRecord();
@@ -909,9 +950,9 @@ class Plugin extends AppPlugin {
         bodyForWrite = this.stripTitleLine(bodyAll, titleLineRaw);
       }
     } else {
-      // CREATE: new record in trigger-named collection, or the active collection.
-      targetCollection = await this.resolveTargetCollection(triggers, activeCollection);
-      if (!targetCollection) { this.toast("Templater", "No target collection — open a collection or set a Trigger."); return; }
+      // CREATE: explicitly chosen collection (picker) wins; else trigger-named or active.
+      targetCollection = (opts && opts.collection) || await this.resolveTargetCollection(triggers, activeCollection);
+      if (!targetCollection) { this.toast("Templater", "No target collection — pick one, or open a collection first."); return; }
       createdNewGuid = targetCollection.createRecord(title);
       if (!createdNewGuid) throw new Error("createRecord returned no GUID");
       targetRecord = await this.pollRecord(createdNewGuid);
@@ -1444,6 +1485,24 @@ class Plugin extends AppPlugin {
   // ========================================================================
   // Helpers
   // ========================================================================
+
+  // Thymer's global key handler swallows Space (and some keys) from plugin-modal inputs.
+  // Intercept Space on the input itself and insert it manually so it survives whether the
+  // host blocks it in the capture phase (we still insert) or the bubble phase (we stop it).
+  attachInputGuards(el) {
+    if (!el) return;
+    el.addEventListener('keydown', (e) => {
+      if (e.key === ' ' || e.key === 'Spacebar' || e.code === 'Space') {
+        e.stopPropagation();
+        e.preventDefault();
+        const s = (el.selectionStart == null) ? el.value.length : el.selectionStart;
+        const en = (el.selectionEnd == null) ? el.value.length : el.selectionEnd;
+        el.value = el.value.slice(0, s) + ' ' + el.value.slice(en);
+        el.selectionStart = el.selectionEnd = s + 1;
+        try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch (e2) {}
+      }
+    });
+  }
 
   toast(title, message) {
     try { this.ui.addToaster({ title, message, dismissible: true, autoDestroyTime: 4000 }); } catch (e) {}
