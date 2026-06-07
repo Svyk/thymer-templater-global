@@ -1,6 +1,3 @@
-I have everything I need. Now I'll produce the standalone plugin.css using Thymer core tokens that exist on all themes.
-
-```css
 /* Templater v2 — modal styles (Thymer core theme tokens; safe on ALL themes) */
 
 .tmpl-overlay {
@@ -115,4 +112,3 @@ I have everything I need. Now I'll produce the standalone plugin.css using Thyme
   overflow-y: auto;
   margin-bottom: 12px;
 }
-```
