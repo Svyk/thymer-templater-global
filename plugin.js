@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.0.2 loaded — global AppPlugin', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.1.0 loaded — global AppPlugin', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -429,19 +429,32 @@ class Plugin extends AppPlugin {
 
   collectPrompts(content, defaults) {
     const stripped = content.replace(/<%\*[\s\S]*?%>/g, '');
-    const re = /\{\{prompt:([^}]+?)\}\}/g;
-    const seen = new Map();
+    const seen = new Map(); // label -> { defaultValue, choices }
     let m;
+    // Choice prompts FIRST so they win the dedup: {{prompt.choice:LABEL :: a, b, c}} (inline
+    // options -> dropdown). A bare {{prompt.choice:LABEL}} with no options degrades to text.
+    const choiceRe = /\{\{prompt\.choice:([^}]+?)\}\}/g;
+    while ((m = choiceRe.exec(stripped)) !== null) {
+      const dd = m[1].trim().split(/\s*::\s*/);
+      const label = dd[0].trim();
+      const choices = dd[1] ? dd[1].split(',').map(s => s.trim()).filter(Boolean) : [];
+      if (!seen.has(label)) {
+        seen.set(label, { defaultValue: choices[0] || (defaults && defaults[label]) || "", choices });
+      } else if (choices.length && !(seen.get(label).choices || []).length) {
+        seen.get(label).choices = choices;
+      }
+    }
+    // Plain prompts: {{prompt:LABEL ?? def}}
+    const re = /\{\{prompt:([^}]+?)\}\}/g;
     while ((m = re.exec(stripped)) !== null) {
-      const raw = m[1].trim();
-      const [labelPart, defaultPart] = raw.split(/\s*\?\?\s*/);
+      const [labelPart, defaultPart] = m[1].trim().split(/\s*\?\?\s*/);
       const label = labelPart.trim();
       if (!seen.has(label)) {
         const dflt = (defaultPart !== undefined) ? defaultPart.trim() : ((defaults && defaults[label]) || "");
-        seen.set(label, dflt);
+        seen.set(label, { defaultValue: dflt, choices: [] });
       }
     }
-    return Array.from(seen, ([label, defaultValue]) => ({ label, defaultValue }));
+    return Array.from(seen, ([label, v]) => ({ label, defaultValue: v.defaultValue, choices: v.choices || [] }));
   }
 
   // ========================================================================
@@ -450,6 +463,14 @@ class Plugin extends AppPlugin {
 
   async renderTemplate(content, ctx) {
     let out = content;
+
+    // {{prompt.choice:LABEL :: opts}} -> the picked value (shares the LABEL prompt answer).
+    // Resolved before the plain {{prompt:...}} rule so the `.choice` form is consumed first.
+    out = out.replace(/\{\{prompt\.choice:([^}]+?)\}\}/g, (_, body) => {
+      const label = body.split(/\s*::\s*/)[0].trim();
+      const v = ctx.prompts && ctx.prompts[label];
+      return (v != null && v !== "") ? v : "";
+    });
 
     // {{prompt:LABEL ?? def}}
     out = out.replace(/\{\{prompt:([^}]+?)\}\}/g, (_, body) => {
@@ -516,8 +537,9 @@ class Plugin extends AppPlugin {
     if (!fmt) return "today";
     const f = String(fmt).trim();
     if (!f) return "today";
-    // strftime-ish format string -> resolve now to a concrete date.
-    if (/(YYYY|MM|DD|HH|mm|ss)/.test(f)) {
+    // strftime-ish format string -> resolve now to a concrete date. (Single M/D omitted from
+    // detection to avoid catching natural language; they still RESOLVE in formatDate.)
+    if (/(YYYY|YY|MMMM|MMM|MM|DD|dddd|ddd|HH|mm|ss)/.test(f)) {
       return this.formatDate(new Date(), f);
     }
     // Natural-language / relative: hand the raw string to Thymer's parser.
@@ -531,13 +553,27 @@ class Plugin extends AppPlugin {
       return `${dow} ${mon} ${d.getDate()}`;
     }
     const pad = (n, w) => String(n).padStart(w, '0');
-    return String(fmt)
-      .replace(/YYYY/g, d.getFullYear())
-      .replace(/MM/g, pad(d.getMonth() + 1, 2))
-      .replace(/DD/g, pad(d.getDate(), 2))
-      .replace(/HH/g, pad(d.getHours(), 2))
-      .replace(/mm/g, pad(d.getMinutes(), 2))
-      .replace(/ss/g, pad(d.getSeconds(), 2));
+    const WDL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const WDS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const MOL = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+    const MOS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const map = {
+      YYYY: String(d.getFullYear()),
+      YY: pad(d.getFullYear() % 100, 2),
+      MMMM: MOL[d.getMonth()],
+      MMM: MOS[d.getMonth()],
+      MM: pad(d.getMonth() + 1, 2),
+      M: String(d.getMonth() + 1),
+      DD: pad(d.getDate(), 2),
+      D: String(d.getDate()),
+      dddd: WDL[d.getDay()],
+      ddd: WDS[d.getDay()],
+      HH: pad(d.getHours(), 2),
+      mm: pad(d.getMinutes(), 2),
+      ss: pad(d.getSeconds(), 2),
+    };
+    // Single pass, longest tokens first so MMM/MM/M (and dddd/ddd, YYYY/YY, DD/D) don't collide.
+    return String(fmt).replace(/YYYY|MMMM|dddd|MMM|ddd|YY|MM|DD|HH|mm|ss|M|D/g, t => map[t]);
   }
 
   async resolveRefGuid(key) {
@@ -797,7 +833,7 @@ class Plugin extends AppPlugin {
   }
 
   // ========================================================================
-  // Prompts modal (multi-field)
+  // Prompts modal (multi-field). Choice prompts render as a <select> dropdown.
   // ========================================================================
 
   openPromptsModal(template, prompts, onSubmit) {
@@ -808,15 +844,31 @@ class Plugin extends AppPlugin {
     modal.className = 'tmpl-modal';
     modal.innerHTML = `<h2>Apply: ${this.escape(tName)}</h2><div class="tmpl-sub">${prompts.length} variable${prompts.length === 1 ? '' : 's'} to fill in</div>`;
     const fields = [];
-    prompts.forEach(({ label, defaultValue }) => {
+    prompts.forEach(({ label, defaultValue, choices }) => {
       const wrap = document.createElement('div');
       wrap.className = 'tmpl-field';
-      const low = label.toLowerCase();
-      const isLong = low.includes('description') || low.includes('details') || low.includes('notes') || label.length > 30;
-      wrap.innerHTML = `<label>${this.escape(label)}</label>${isLong ? '<textarea></textarea>' : '<input type="text" />'}`;
-      const input = wrap.querySelector('input, textarea');
-      if (defaultValue) input.value = defaultValue;
-      this.attachInputGuards(input);
+      const labelEl = document.createElement('label');
+      labelEl.textContent = label;
+      wrap.appendChild(labelEl);
+      let input;
+      if (choices && choices.length) {
+        // Choice property -> dropdown (no free-text, so the value always matches a choice label).
+        input = document.createElement('select');
+        choices.forEach(opt => {
+          const o = document.createElement('option');
+          o.value = opt; o.textContent = opt;
+          if (opt === defaultValue) o.selected = true;
+          input.appendChild(o);
+        });
+      } else {
+        const low = label.toLowerCase();
+        const isLong = low.includes('description') || low.includes('details') || low.includes('notes') || label.length > 30;
+        input = document.createElement(isLong ? 'textarea' : 'input');
+        if (!isLong) input.type = 'text';
+        if (defaultValue) input.value = defaultValue;
+        this.attachInputGuards(input);
+      }
+      wrap.appendChild(input);
       fields.push({ label, input });
       modal.appendChild(wrap);
     });
@@ -847,7 +899,7 @@ class Plugin extends AppPlugin {
   }
 
   // ========================================================================
-  // Preview modal
+  // Preview modal (kept for manual use; not in the default apply flow)
   // ========================================================================
 
   openPreview(template, rendered) {
@@ -927,10 +979,28 @@ class Plugin extends AppPlugin {
     const frontmatter = parsed.frontmatter;
     const bodyAll = parsed.body;
 
-    // Title = first non-empty body line (markers stripped to readable text).
+    // Title: prefer an explicit frontmatter `Title:` (composed from the record's properties),
+    // else fall back to the first non-empty body line. When the title comes from frontmatter,
+    // the first body line is REAL content and must NOT be stripped.
     const bodyLines = bodyAll.split('\n');
     const titleLineRaw = bodyLines.find(l => l.trim()) || this.tName(template);
-    const title = this.deriveTitle(titleLineRaw);
+    const fmTitle = frontmatter && (frontmatter.Title || frontmatter.title || frontmatter.Name || frontmatter.name);
+    let title, dropTitleLine;
+    if (fmTitle != null && String(fmTitle).trim()) {
+      // Clean up separators left dangling when an optional token rendered empty
+      // (e.g. "1:1 · " when Attendees was skipped).
+      title = String(fmTitle)
+        .replace(/\s{2,}/g, ' ')
+        .replace(/\s*[·—–-]\s*([·—–-]\s*)+/g, ' · ')  // collapse doubled separators (empty middle)
+        .replace(/[·—–-]\s*$/, '')                     // trailing separator
+        .replace(/^\s*[·—–-]\s*/, '')                  // leading separator
+        .trim()
+        .slice(0, 200) || this.tName(template);
+      dropTitleLine = false;
+    } else {
+      title = this.deriveTitle(titleLineRaw);
+      dropTitleLine = true;
+    }
 
     let targetRecord = null;
     let targetCollection = null;
@@ -947,7 +1017,7 @@ class Plugin extends AppPlugin {
       // as the record name). Append-mode keeps it (the record's own name is left untouched).
       if (updateMode) {
         await this.trySetRecordTitle(targetRecord, title);
-        bodyForWrite = this.stripTitleLine(bodyAll, titleLineRaw);
+        if (dropTitleLine) bodyForWrite = this.stripTitleLine(bodyAll, titleLineRaw);
       }
     } else {
       // CREATE: explicitly chosen collection (picker) wins; else trigger-named or active.
@@ -957,8 +1027,8 @@ class Plugin extends AppPlugin {
       if (!createdNewGuid) throw new Error("createRecord returned no GUID");
       targetRecord = await this.pollRecord(createdNewGuid);
       if (!targetRecord) throw new Error("Could not fetch new record after createRecord");
-      // Drop the title line from the body for a fresh record (the title is the record name).
-      bodyForWrite = this.stripTitleLine(bodyAll, titleLineRaw);
+      // Drop the title line from the body only when the title CAME from the first body line.
+      if (dropTitleLine) bodyForWrite = this.stripTitleLine(bodyAll, titleLineRaw);
     }
 
     // Frontmatter -> properties (CORE).
@@ -1138,7 +1208,7 @@ class Plugin extends AppPlugin {
     // attempt; on any failure fall back to p.set(String(value)). This avoids writing a
     // DateTimeValue object into a text field (the old `p.datetime || p.date` guard was a
     // no-op because those methods always exist on every PluginProperty).
-    const keyLooksDate = /date|due|\bat\b|when|scheduled|time|start|end/i.test(key);
+    const keyLooksDate = /date|due|\bat\b|when|scheduled|time|start|end|birthday|contact/i.test(key);
     const valLooksDate = /^\d{4}-\d{2}-\d{2}/.test(value) ||
       /\b(today|tomorrow|yesterday|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i.test(value) ||
       /\b(next|last)\b/i.test(value) || /\d+\s*(day|days|week|weeks|month|months|year|years)\b/i.test(value);
@@ -1244,8 +1314,8 @@ class Plugin extends AppPlugin {
     }
   }
 
-  // Segment-aware tokenizer. Emits ref / datetime / hashtag segments from the bounded
-  // sentinel markers (REF/TAG/DATE) and from inline #tags; everything else is text.
+  // Segment-aware tokenizer. Emits ref / datetime / hashtag / bold / italic / code segments
+  // from the bounded sentinel markers (REF/TAG/DATE) and inline markdown; everything else is text.
   // The bounded marker class never swallows trailing content, so a line with two refs
   // (or a ref followed by text/#tag/date) segments correctly.
   parseInlineSegments(line) {
