@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.2.0 loaded — global AppPlugin', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.3.0 loaded — global AppPlugin', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -1202,8 +1202,12 @@ class Plugin extends AppPlugin {
       // in a frontmatter value collapses to its [[label]] display text (documented behavior:
       // frontmatter sets text/choice/datetime props, not relation/ref props). The bounded
       // marker regex means only the marker is replaced — surrounding value text is preserved.
+      // A value that is PURELY a record ref -> keep the guid so a record-type (relation)
+      // property gets a real link. previewText would otherwise collapse it to plain text.
+      const refOnly = val.match(new RegExp('^' + M_OPEN + 'REF' + M_SEP + '([^' + M_SEP + M_CLOSE + ']+)(?:' + M_SEP + '[^' + M_CLOSE + ']*)?' + M_CLOSE + '$'));
+      if (refOnly) { if (key) fm[key] = { __relation: refOnly[1] }; continue; }
       val = this.previewText(val);
-      val = val.replace(/^\[\[(.+)\]\]$/, '$1');  // a picked-record ref in a property -> plain name
+      val = val.replace(/^\[\[(.+)\]\]$/, '$1');  // a non-pure ref in a property -> plain name
       if (key) fm[key] = val;
     }
     const body = lines.slice(end + 1).join('\n').replace(/^\n+/, '');
@@ -1221,6 +1225,13 @@ class Plugin extends AppPlugin {
   }
 
   applyPropertyValue(p, key, value) {
+    // Relation: a record-type property set to the picked record's GUID. set(guid) on a record
+    // property creates the link (linkedRecord() may read back null even when stored — verify
+    // via get_record_properties, not the resolver). Accepts a guid or array of guids.
+    if (value && typeof value === 'object' && value.__relation != null) {
+      try { p.set(value.__relation); } catch (e) { console.warn('[Templater] relation set failed', key, e); }
+      return;
+    }
     if (value == null || value === "") return;
 
     // Choice? — choices() is non-null only for choice properties.
