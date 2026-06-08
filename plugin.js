@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.3.0 loaded — global AppPlugin', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.4.0 loaded — global AppPlugin', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -458,15 +458,17 @@ class Plugin extends AppPlugin {
         seen.get(label).choices = choices;
       }
     }
-    // Record-reference prompts: {{prompt.record:LABEL :: Collection}} -> dropdown of that
-    // collection's records; resolves to a clickable ref (and a plain name in properties).
-    const recordRe = /\{\{prompt\.record:([^}]+?)\}\}/g;
+    // Record-reference prompts: {{prompt.record:LABEL :: Collection}} (single) or
+    // {{prompt.records:LABEL :: Collection}} (MANY -> multi-select). Dropdown of that
+    // collection's records; resolves to clickable ref(s) / a relation in a record property.
+    const recordRe = /\{\{prompt\.record(s)?:([^}]+?)\}\}/g;
     while ((m = recordRe.exec(stripped)) !== null) {
-      const dd = m[1].trim().split(/\s*::\s*/);
+      const multi = !!m[1];
+      const dd = m[2].trim().split(/\s*::\s*/);
       const label = dd[0].trim();
       const recordCollection = dd[1] ? dd[1].trim() : "";
-      if (!seen.has(label)) seen.set(label, { defaultValue: "", choices: [], recordCollection });
-      else if (recordCollection && !seen.get(label).recordCollection) seen.get(label).recordCollection = recordCollection;
+      if (!seen.has(label)) seen.set(label, { defaultValue: "", choices: [], recordCollection, multi });
+      else { const sv = seen.get(label); if (recordCollection && !sv.recordCollection) sv.recordCollection = recordCollection; if (multi) sv.multi = true; }
     }
     // Plain prompts: {{prompt:LABEL ?? def}}
     const re = /\{\{prompt:([^}]+?)\}\}/g;
@@ -478,7 +480,7 @@ class Plugin extends AppPlugin {
         seen.set(label, { defaultValue: dflt, choices: [] });
       }
     }
-    return Array.from(seen, ([label, v]) => ({ label, defaultValue: v.defaultValue, choices: v.choices || [], recordCollection: v.recordCollection || "" }));
+    return Array.from(seen, ([label, v]) => ({ label, defaultValue: v.defaultValue, choices: v.choices || [], recordCollection: v.recordCollection || "", multi: v.multi || false }));
   }
 
   // ========================================================================
@@ -496,24 +498,30 @@ class Plugin extends AppPlugin {
       return (v != null && v !== "") ? v : "";
     });
 
-    // {{prompt:LABEL ?? def}}
+    // {{prompt:LABEL ?? def}}  (an array value, from a multi-record prompt, joins with ', ')
     out = out.replace(/\{\{prompt:([^}]+?)\}\}/g, (_, body) => {
       const [labelPart, defPart] = body.split(/\s*\?\?\s*/);
       const label = labelPart.trim();
       const v = ctx.prompts && ctx.prompts[label];
+      if (Array.isArray(v)) return v.join(', ');
       if (v != null && v !== "") return v;
       return (defPart !== undefined) ? defPart.trim() : "";
     });
 
-    // {{prompt.record:LABEL :: Collection}} -> ref marker to the picked record (clickable in
-    // body; collapses to the plain name in a frontmatter property value).
-    out = await this.replaceAsync(out, /\{\{prompt\.record:([^}]+?)\}\}/g, async (_, body) => {
+    // {{prompt.record:LABEL :: Collection}} (single) / {{prompt.records:...}} (many) -> ref
+    // marker(s) for the picked record(s), concatenated so a frontmatter relation captures all guids.
+    out = await this.replaceAsync(out, /\{\{prompt\.record(s)?:([^}]+?)\}\}/g, async (_, plural, body) => {
       const label = body.split(/\s*::\s*/)[0].trim();
-      const name = ctx.prompts && ctx.prompts[label];
-      if (name == null || name === "") return "";
-      const guid = await this.resolveRefGuid(String(name).trim());
-      if (guid) return M_OPEN + "REF" + M_SEP + guid + M_SEP + String(name).trim() + M_CLOSE;
-      return String(name);
+      const v = ctx.prompts && ctx.prompts[label];
+      const names = Array.isArray(v) ? v : (v == null || v === "" ? [] : [v]);
+      let outRefs = "";
+      for (const nm of names) {
+        const name = String(nm).trim();
+        if (!name) continue;
+        const guid = await this.resolveRefGuid(name);
+        outRefs += guid ? (M_OPEN + "REF" + M_SEP + guid + M_SEP + name + M_CLOSE) : name;
+      }
+      return outRefs;
     });
 
     // {{record.PropName}}
@@ -879,20 +887,21 @@ class Plugin extends AppPlugin {
     modal.className = 'tmpl-modal';
     modal.innerHTML = `<h2>Apply: ${this.escape(tName)}</h2><div class="tmpl-sub">${prompts.length} variable${prompts.length === 1 ? '' : 's'} to fill in</div>`;
     const fields = [];
-    prompts.forEach(({ label, defaultValue, choices }) => {
+    prompts.forEach(({ label, defaultValue, choices, multi }) => {
       const wrap = document.createElement('div');
       wrap.className = 'tmpl-field';
       const labelEl = document.createElement('label');
-      labelEl.textContent = label;
+      labelEl.textContent = multi ? (label + " (⌘-click for multiple)") : label;
       wrap.appendChild(labelEl);
       let input;
       if (choices && choices.length) {
-        // Choice / record property -> dropdown (value always matches a real choice or record).
+        // Choice / record property -> dropdown. Multi-record -> multi-select.
         input = document.createElement('select');
+        if (multi) { input.multiple = true; input.size = Math.min(Math.max(choices.length, 2), 6); }
         choices.forEach(opt => {
           const o = document.createElement('option');
           o.value = opt; o.textContent = opt;
-          if (opt === defaultValue) o.selected = true;
+          if (!multi && opt === defaultValue) o.selected = true;
           input.appendChild(o);
         });
       } else {
@@ -904,7 +913,7 @@ class Plugin extends AppPlugin {
         this.attachInputGuards(input);
       }
       wrap.appendChild(input);
-      fields.push({ label, input });
+      fields.push({ label, input, multi });
       modal.appendChild(wrap);
     });
     const actions = document.createElement('div');
@@ -923,7 +932,9 @@ class Plugin extends AppPlugin {
     submit.onclick = () => {
       if (done) return; done = true;
       const values = {};
-      for (const { label, input } of fields) values[label] = input.value;
+      for (const { label, input, multi } of fields) {
+        values[label] = (multi && input.multiple) ? Array.from(input.selectedOptions).map(o => o.value) : input.value;
+      }
       close();
       onSubmit(values);
     };
@@ -1204,8 +1215,12 @@ class Plugin extends AppPlugin {
       // marker regex means only the marker is replaced — surrounding value text is preserved.
       // A value that is PURELY a record ref -> keep the guid so a record-type (relation)
       // property gets a real link. previewText would otherwise collapse it to plain text.
-      const refOnly = val.match(new RegExp('^' + M_OPEN + 'REF' + M_SEP + '([^' + M_SEP + M_CLOSE + ']+)(?:' + M_SEP + '[^' + M_CLOSE + ']*)?' + M_CLOSE + '$'));
-      if (refOnly) { if (key) fm[key] = { __relation: refOnly[1] }; continue; }
+      // One-or-more PURE record refs (nothing else) -> keep guid(s) for a record (relation)
+      // property: a single guid, or an array for a many-relation.
+      const refRe = new RegExp(M_OPEN + 'REF' + M_SEP + '([^' + M_SEP + M_CLOSE + ']+)(?:' + M_SEP + '[^' + M_CLOSE + ']*)?' + M_CLOSE, 'g');
+      const refGuids = []; let rmm, refLen = 0;
+      while ((rmm = refRe.exec(val)) !== null) { refGuids.push(rmm[1]); refLen += rmm[0].length; }
+      if (refGuids.length && refLen === val.length) { if (key) fm[key] = { __relation: refGuids.length === 1 ? refGuids[0] : refGuids }; continue; }
       val = this.previewText(val);
       val = val.replace(/^\[\[(.+)\]\]$/, '$1');  // a non-pure ref in a property -> plain name
       if (key) fm[key] = val;
