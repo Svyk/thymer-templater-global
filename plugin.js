@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.1.0 loaded — global AppPlugin', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.2.0 loaded — global AppPlugin', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -324,8 +324,20 @@ class Plugin extends AppPlugin {
     const updateMode = triggers.some(t => /^update current record$/i.test(t));
 
     // Flow: [pick collection] -> fill prompts -> create + fill + open. No preview step.
-    const proceed = (chosenCollection) => {
+    const proceed = async (chosenCollection) => {
       const prompts = this.collectPrompts(content, vars.defaults);
+      // Pre-load record options for {{prompt.record:...}} prompts -> dropdown of record names.
+      for (const pr of prompts) {
+        if (pr.recordCollection) {
+          try {
+            const coll = await this.collectionByName(pr.recordCollection);
+            if (coll) {
+              const recs = await coll.getAllRecords();
+              pr.choices = recs.map(r => { try { return r.getName(); } catch (e) { return null; } }).filter(Boolean).sort((a, b) => a.localeCompare(b));
+            }
+          } catch (e) { console.warn('[Templater] record options load failed:', e); }
+        }
+      }
       const finalize = async (promptValues) => {
         let rendered;
         try {
@@ -355,8 +367,10 @@ class Plugin extends AppPlugin {
 
     // Append/Update operate on the active record — no collection choice.
     if (appendMode || updateMode) { proceed(null); return; }
-    // Create mode: a Trigger may pin a collection; otherwise ask which collection.
-    const pinned = await this.resolveTargetCollection(triggers, null);
+    // Create mode: pin the collection from a Trigger or Variables JSON {"collection":"X"};
+    // only fall back to the picker when the template doesn't say where it belongs.
+    let pinned = await this.resolveTargetCollection(triggers, null);
+    if (!pinned && vars.collection) { try { pinned = await this.collectionByName(String(vars.collection)); } catch (e) {} }
     if (pinned) { proceed(pinned); return; }
     this.openCollectionPicker((col) => proceed(col));
   }
@@ -444,6 +458,16 @@ class Plugin extends AppPlugin {
         seen.get(label).choices = choices;
       }
     }
+    // Record-reference prompts: {{prompt.record:LABEL :: Collection}} -> dropdown of that
+    // collection's records; resolves to a clickable ref (and a plain name in properties).
+    const recordRe = /\{\{prompt\.record:([^}]+?)\}\}/g;
+    while ((m = recordRe.exec(stripped)) !== null) {
+      const dd = m[1].trim().split(/\s*::\s*/);
+      const label = dd[0].trim();
+      const recordCollection = dd[1] ? dd[1].trim() : "";
+      if (!seen.has(label)) seen.set(label, { defaultValue: "", choices: [], recordCollection });
+      else if (recordCollection && !seen.get(label).recordCollection) seen.get(label).recordCollection = recordCollection;
+    }
     // Plain prompts: {{prompt:LABEL ?? def}}
     const re = /\{\{prompt:([^}]+?)\}\}/g;
     while ((m = re.exec(stripped)) !== null) {
@@ -454,7 +478,7 @@ class Plugin extends AppPlugin {
         seen.set(label, { defaultValue: dflt, choices: [] });
       }
     }
-    return Array.from(seen, ([label, v]) => ({ label, defaultValue: v.defaultValue, choices: v.choices || [] }));
+    return Array.from(seen, ([label, v]) => ({ label, defaultValue: v.defaultValue, choices: v.choices || [], recordCollection: v.recordCollection || "" }));
   }
 
   // ========================================================================
@@ -479,6 +503,17 @@ class Plugin extends AppPlugin {
       const v = ctx.prompts && ctx.prompts[label];
       if (v != null && v !== "") return v;
       return (defPart !== undefined) ? defPart.trim() : "";
+    });
+
+    // {{prompt.record:LABEL :: Collection}} -> ref marker to the picked record (clickable in
+    // body; collapses to the plain name in a frontmatter property value).
+    out = await this.replaceAsync(out, /\{\{prompt\.record:([^}]+?)\}\}/g, async (_, body) => {
+      const label = body.split(/\s*::\s*/)[0].trim();
+      const name = ctx.prompts && ctx.prompts[label];
+      if (name == null || name === "") return "";
+      const guid = await this.resolveRefGuid(String(name).trim());
+      if (guid) return M_OPEN + "REF" + M_SEP + guid + M_SEP + String(name).trim() + M_CLOSE;
+      return String(name);
     });
 
     // {{record.PropName}}
@@ -833,7 +868,7 @@ class Plugin extends AppPlugin {
   }
 
   // ========================================================================
-  // Prompts modal (multi-field). Choice prompts render as a <select> dropdown.
+  // Prompts modal (multi-field). Choice + record prompts render as a <select> dropdown.
   // ========================================================================
 
   openPromptsModal(template, prompts, onSubmit) {
@@ -852,7 +887,7 @@ class Plugin extends AppPlugin {
       wrap.appendChild(labelEl);
       let input;
       if (choices && choices.length) {
-        // Choice property -> dropdown (no free-text, so the value always matches a choice label).
+        // Choice / record property -> dropdown (value always matches a real choice or record).
         input = document.createElement('select');
         choices.forEach(opt => {
           const o = document.createElement('option');
@@ -1168,6 +1203,7 @@ class Plugin extends AppPlugin {
       // frontmatter sets text/choice/datetime props, not relation/ref props). The bounded
       // marker regex means only the marker is replaced — surrounding value text is preserved.
       val = this.previewText(val);
+      val = val.replace(/^\[\[(.+)\]\]$/, '$1');  // a picked-record ref in a property -> plain name
       if (key) fm[key] = val;
     }
     const body = lines.slice(end + 1).join('\n').replace(/^\n+/, '');
