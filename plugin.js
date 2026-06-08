@@ -1021,7 +1021,7 @@ class Plugin extends AppPlugin {
     const titleLineRaw = bodyLines.find(l => l.trim()) || this.tName(template);
     const fmTitle = frontmatter && (frontmatter.Title || frontmatter.title || frontmatter.Name || frontmatter.name);
     let title, dropTitleLine;
-    if (fmTitle != null && String(fmTitle).trim()) {
+    if (fmTitle != null && typeof fmTitle === 'string' && fmTitle.trim()) {
       // Clean up separators left dangling when an optional token rendered empty
       // (e.g. "1:1 · " when Attendees was skipped).
       title = String(fmTitle)
