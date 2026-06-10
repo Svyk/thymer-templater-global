@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.4.0 loaded — global AppPlugin', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.5.0 loaded — global AppPlugin', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -13,6 +13,7 @@ const RECURSION_LIMIT = 3;
 const SLASH_RE = /^\/tmpl(?:\s+(.+))?$/;
 const SLASH_COOLDOWN_MS = 500;
 const AUTO_COOLDOWN_MS = 30000;
+const COLL_CACHE_TTL_MS = 30000;
 const GUID_RE = /^[A-Z0-9]{26}$/;
 
 // Field labels (read robustly by label, never by id).
@@ -54,39 +55,13 @@ class Plugin extends AppPlugin {
       autoCooldown: (window.__templater && window.__templater.autoCooldown) || new Map(),
       slashCooldown: new Map(),
       clearing: new Set(),
+      collCache: null,
+      autoIndex: null,
     };
     this._state = window.__templater;
 
-    // --- CSS (drop prior style, re-inject — don't stack) ---
-    try {
-      const prior = document.getElementById('templater-css');
-      if (prior && prior.parentNode) prior.parentNode.removeChild(prior);
-    } catch (e) {}
-    try {
-      this.ui.injectCSS(`
-        #templater-css{display:none}
-        .tmpl-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 100000; display: flex; align-items: center; justify-content: center; }
-        .tmpl-modal { background: var(--cards-bg, var(--color-bg-900, #fff)); color: var(--color-text-400, #111); border: 1px solid var(--cards-border-color, rgba(0,0,0,0.1)); border-radius: 12px; padding: 20px 22px; min-width: 460px; max-width: 760px; max-height: 80vh; overflow-y: auto; box-shadow: 0 12px 48px rgba(0,0,0,0.35); font-family: var(--font-family, -apple-system, sans-serif); }
-        .tmpl-modal h2 { margin: 0 0 6px; font-size: 16px; font-weight: 600; color: var(--color-text-100, inherit); }
-        .tmpl-modal .tmpl-sub { color: var(--color-text-600, #6b7280); font-size: 12px; margin-bottom: 16px; }
-        .tmpl-field { display: flex; flex-direction: column; margin-bottom: 14px; }
-        .tmpl-field label { font-size: 12px; font-weight: 500; margin-bottom: 4px; color: var(--color-text-600, #6b7280); }
-        .tmpl-field input, .tmpl-field textarea, .tmpl-field select { background: var(--input-bg-color, rgba(0,0,0,0.04)); color: var(--color-text-400, inherit); border: 1px solid var(--cards-border-color, rgba(0,0,0,0.1)); border-radius: 6px; padding: 8px 10px; font-size: 13px; font-family: inherit; }
-        .tmpl-field textarea { min-height: 60px; resize: vertical; }
-        .tmpl-field input:focus, .tmpl-field textarea:focus, .tmpl-field select:focus { outline: none; border-color: #3b82f6; }
-        .tmpl-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
-        .tmpl-btn { padding: 6px 14px; border-radius: 6px; font-size: 13px; cursor: pointer; border: 1px solid var(--cards-border-color, rgba(0,0,0,0.1)); background: var(--button-bg-color, rgba(0,0,0,0.04)); color: var(--color-text-400, inherit); }
-        .tmpl-btn.primary { background: #10b981; color: #fff; border-color: #10b981; }
-        .tmpl-btn:hover { filter: brightness(1.05); }
-        .tmpl-btn:disabled { opacity: 0.6; cursor: default; }
-        .tmpl-preview { background: var(--input-bg-color, rgba(0,0,0,0.04)); border: 1px solid var(--cards-border-color, rgba(0,0,0,0.1)); border-radius: 6px; padding: 12px 14px; font-family: ui-monospace, SF Mono, Menlo, monospace; font-size: 12px; white-space: pre-wrap; max-height: 50vh; overflow-y: auto; margin-bottom: 12px; color: var(--color-text-400, inherit); }
-        .tmpl-sugg-list { list-style: none; margin: 0; padding: 0; max-height: 50vh; overflow-y: auto; }
-        .tmpl-sugg-item { padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; }
-        .tmpl-sugg-item:hover, .tmpl-sugg-item.active { background: var(--sidebar-bg-hover, rgba(0,0,0,0.06)); }
-      `);
-    } catch (e) { console.warn('[Templater] injectCSS failed:', e); }
-
     // --- command palette + sidebar + status bar (GUARDRAIL #6 icons; capture remove()) ---
+    // Styles live in plugin.css only (single source — injectCSS stacked across hot reloads).
     try {
       const cmd = this.ui.addCommandPaletteCommand({
         label: "Apply Template...",
@@ -128,7 +103,7 @@ class Plugin extends AppPlugin {
       this._state.eventIds.push(autoId);
     } catch (e) { console.warn('[Templater] auto handler add failed:', e); }
 
-    console.log('[Templater] commands + slash + auto-apply registered, CSS injected.');
+    console.log('[Templater] commands + slash + auto-apply registered.');
   }
 
   onUnload() {
@@ -339,6 +314,7 @@ class Plugin extends AppPlugin {
         }
       }
       const finalize = async (promptValues) => {
+        if (promptValues == null) return;
         let rendered;
         try {
           rendered = await this.renderTemplate(content, {
@@ -838,13 +814,16 @@ class Plugin extends AppPlugin {
         else if (e.key === 'Escape') { e.preventDefault(); close(-1); }
       };
 
-      let teardownIdx = -1;
+      let teardownFn = null;
       const close = (idx) => {
         if (done) return;
         done = true;
         try { document.removeEventListener('keydown', onKey, true); } catch (e) {}
         try {
-          if (teardownIdx >= 0 && this._state && this._state.disposers) this._state.disposers.splice(teardownIdx, 1);
+          if (teardownFn && this._state && this._state.disposers) {
+            const at = this._state.disposers.indexOf(teardownFn);
+            if (at >= 0) this._state.disposers.splice(at, 1);
+          }
         } catch (e) {}
         try { document.body.removeChild(overlay); } catch (e) {}
         resolve(idx);
@@ -869,7 +848,8 @@ class Plugin extends AppPlugin {
       // Track teardown so an outer overlay tear-down (hot-reload onUnload) can't leak it.
       try {
         if (this._state && this._state.disposers) {
-          teardownIdx = this._state.disposers.push(() => close(-1)) - 1;
+          teardownFn = () => close(-1);
+          this._state.disposers.push(teardownFn);
         }
       } catch (e) {}
     });
@@ -927,8 +907,8 @@ class Plugin extends AppPlugin {
     setTimeout(() => { try { fields[0] && fields[0].input.focus(); } catch (e) {} }, 0);
     let done = false;
     const close = () => { try { document.body.removeChild(overlay); } catch (e) {} };
-    cancel.onclick = () => { if (done) return; done = true; close(); onSubmit({}); };
-    overlay.onclick = (e) => { if (e.target === overlay) { if (done) return; done = true; close(); onSubmit({}); } };
+    cancel.onclick = () => { if (done) return; done = true; close(); onSubmit(null); };
+    overlay.onclick = (e) => { if (e.target === overlay) { if (done) return; done = true; close(); onSubmit(null); } };
     submit.onclick = () => {
       if (done) return; done = true;
       const values = {};
@@ -1093,10 +1073,9 @@ class Plugin extends AppPlugin {
       if (p && p.setFromDate) p.setFromDate(new Date());
     } catch (e) { /* best-effort */ }
 
-    // Audit (best-effort).
-    try {
-      await this.writeAuditRow(template, targetRecord.guid, targetCollection, title, this.previewText(rendered));
-    } catch (e) { console.warn('[Templater] audit write failed:', e); }
+    // Audit (best-effort, not awaited — keeps the apply hot path off the audit poll).
+    this.writeAuditRow(template, targetRecord.guid, targetCollection, title, this.previewText(rendered))
+      .catch(e => console.warn('[Templater] audit write failed:', e));
 
     this.toast(
       "Applied: " + this.tName(template),
@@ -1142,12 +1121,13 @@ class Plugin extends AppPlugin {
   }
 
   async pollRecord(guid) {
-    await new Promise(r => setTimeout(r, 400));
-    for (let i = 0; i < 12; i++) {
+    let delay = 50;
+    for (let i = 0; i < 14; i++) {
       let rec = null;
       try { rec = this.data.getRecord(guid); } catch (e) {}
       if (rec) return rec;
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise(r => setTimeout(r, delay));
+      if (delay < 200) delay *= 2;
     }
     return null;
   }
@@ -1484,7 +1464,7 @@ class Plugin extends AppPlugin {
       // Clear the /tmpl text from the line, then open the picker.
       const li = ev.getLineItem ? ev.getLineItem() : null;
       const after = () => {
-        setTimeout(() => { try { this._state.clearing.delete(guid); } catch (e) {} }, SLASH_COOLDOWN_MS + 50);
+        setTimeout(() => { try { this._state.clearing.delete(guid); this._state.slashCooldown.delete(guid); } catch (e) {} }, SLASH_COOLDOWN_MS + 50);
         this.openPicker(query || null);
       };
       if (li && li.then) {
@@ -1560,7 +1540,7 @@ class Plugin extends AppPlugin {
       } catch (e) {}
       if (!vars.defaults) vars.defaults = {};
 
-      const cols = await this.data.getAllCollections();
+      const cols = await this.getCollectionsCached();
       const targetCollection = cols.find(c => { try { return c.getGuid && c.getGuid() === collGuid; } catch (e) { return false; } }) || null;
 
       const rendered = await this.renderTemplate(content, {
@@ -1591,9 +1571,43 @@ class Plugin extends AppPlugin {
     }
   }
 
+  // Collection list + auto-template trigger index, cached on _state with a short TTL —
+  // record.created fires on every local creation and must not pay 3x getAllCollections
+  // plus a full Templates scan per event.
+  async getCollectionsCached() {
+    const st = this._state;
+    if (st.collCache && (Date.now() - st.collCache.ts) < COLL_CACHE_TTL_MS) return st.collCache.cols;
+    const cols = (await this.data.getAllCollections()) || [];
+    st.collCache = { ts: Date.now(), cols };
+    return cols;
+  }
+
+  async getAutoTemplateIndex() {
+    const st = this._state;
+    if (st.autoIndex && (Date.now() - st.autoIndex.ts) < COLL_CACHE_TTL_MS) return st.autoIndex.map;
+    const map = new Map();
+    try {
+      const cols = await this.getCollectionsCached();
+      const coll = cols.find(c => c && c.getName && c.getName() === TEMPLATES_COLL) || null;
+      if (coll) {
+        const records = await coll.getAllRecords();
+        for (const r of records) {
+          for (const t of this.tTriggers(r)) {
+            if (/^auto:/i.test(t)) {
+              const name = t.replace(/^auto:/i, '').trim();
+              if (name && !map.has(name)) map.set(name, r);
+            }
+          }
+        }
+      }
+    } catch (e) {}
+    st.autoIndex = { ts: Date.now(), map };
+    return map;
+  }
+
   async collectionNameByGuid(guid) {
     try {
-      const cols = await this.data.getAllCollections();
+      const cols = await this.getCollectionsCached();
       const c = cols.find(cc => { try { return cc.getGuid && cc.getGuid() === guid; } catch (e) { return false; } });
       return c ? c.getName() : null;
     } catch (e) { return null; }
@@ -1601,17 +1615,9 @@ class Plugin extends AppPlugin {
 
   async findAutoTemplateFor(collName) {
     try {
-      const coll = await this.getTemplatesCollection();
-      if (!coll) return null;
-      const records = await coll.getAllRecords();
-      for (const r of records) {
-        const triggers = this.tTriggers(r);
-        for (const t of triggers) {
-          if (/^auto:/i.test(t) && t.replace(/^auto:/i, '').trim() === collName) return r;
-        }
-      }
-    } catch (e) {}
-    return null;
+      const map = await this.getAutoTemplateIndex();
+      return map.get(collName) || null;
+    } catch (e) { return null; }
   }
 
   // ========================================================================

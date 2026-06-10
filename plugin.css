@@ -4,7 +4,7 @@
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.55);
-  z-index: 10000;
+  z-index: 100000;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -51,7 +51,8 @@
 }
 
 .tmpl-field input,
-.tmpl-field textarea {
+.tmpl-field textarea,
+.tmpl-field select {
   background: var(--input-bg-color);
   color: var(--color-text-400);
   border: 1px solid var(--cards-border-color);
@@ -67,7 +68,8 @@
 }
 
 .tmpl-field input:focus,
-.tmpl-field textarea:focus {
+.tmpl-field textarea:focus,
+.tmpl-field select:focus {
   outline: none;
   border-color: #10b981;
 }
@@ -99,6 +101,11 @@
   filter: brightness(1.05);
 }
 
+.tmpl-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .tmpl-preview {
   background: var(--color-bg-900);
   color: var(--color-text-400);
@@ -111,4 +118,24 @@
   max-height: 50vh;
   overflow-y: auto;
   margin-bottom: 12px;
+}
+
+.tmpl-sugg-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.tmpl-sugg-item {
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.tmpl-sugg-item:hover,
+.tmpl-sugg-item.active {
+  background: var(--sidebar-bg-hover);
 }
