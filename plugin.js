@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.5.0 loaded — global AppPlugin', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.13.0 loaded — global AppPlugin', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -541,6 +541,22 @@ class Plugin extends AppPlugin {
       return M_OPEN + "TAG" + M_SEP + "#" + tag + M_CLOSE;
     });
 
+    // TP-1 alias: {{schedule:…}} / {{datetime:…}} behave like {{date:…}} (a real datetime segment that schedules).
+    out = out.replace(/\{\{(?:schedule|datetime):([^}]+)\}\}/g, (_, fmt) => M_OPEN + "DATE" + M_SEP + this.dateStringForSegment(fmt) + M_CLOSE);
+
+    // TP-3: {{cursor}} -> a marker; the line carrying it is navigated-to (highlighted) after apply.
+    out = out.replace(/\{\{cursor\}\}/g, '<!--PLEXUS-CURSOR-->');
+
+    // TS-10: {{banner:URL}} -> a directive; the image is fetched + set as the new record's banner after apply.
+    out = out.replace(/\{\{banner:(https?:\/\/[^}]+)\}\}/g, (_, url) => `<!--PLEXUS-BANNER:${url.trim()}-->`);
+
+    // TS-3: {{relate:Field=Name}} -> a directive that sets a typed record-RELATION property after create (the new
+    // record drops straight into the Plexus Brain graph). Resolved to the target GUID here.
+    out = await this.replaceAsync(out, /\{\{relate:([^=}]+)=([^}]+)\}\}/g, async (_, field, nameOrGuid) => {
+      const guid = await this.resolveRefGuid(nameOrGuid.trim());
+      return guid ? `<!--PLEXUS-RELATE:${field.trim()}=${guid}-->` : '';
+    });
+
     // <%* js %> sandbox (async tp.* namespace)
     out = await this.replaceAsync(out, /<%\*([\s\S]*?)%>/g, async (_, code) => {
       return await this.runJsBlock(code, ctx);
@@ -644,6 +660,7 @@ class Plugin extends AppPlugin {
     const blockedRe = /\b(eval|Function|window|globalThis|localStorage|sessionStorage|XMLHttpRequest)\b|document\s*\.\s*write|import\s*\(|require\s*\(|fetch\s*\(/;
     try {
       if (blockedRe.test(code)) return "[js blocked: forbidden identifier]";
+      await this._ensureUserFns(); // TS-5: load tp.user.* from the Template Functions collection
       const tp = this.buildTp(ctx);
       // Support both `return expr` style and statement bodies.
       let body = code;
@@ -661,6 +678,29 @@ class Plugin extends AppPlugin {
     }
   }
 
+  // TS-5: load reusable JS functions from a `Template Functions` collection (record name = fn name; body = the
+  // record's body line items or a Body/Function/Code text property). Trusted plugin-side eval. Cached per session.
+  async _ensureUserFns() {
+    if (this._userFnsLoaded) return;
+    this._userFnsLoaded = true; this._userFns = {};
+    try {
+      const cols = await this.data.getAllCollections();
+      const col = (cols || []).find((c) => { try { return /^template functions$/i.test(c.getName()); } catch (_e) { return false; } });
+      if (!col) return;
+      const recs = await col.getAllRecords();
+      for (const r of (recs || [])) {
+        try {
+          const name = (r.getName && r.getName()) || ''; if (!name) continue;
+          let body = '';
+          try { const bp = r.prop && (r.prop('Body') || r.prop('Function') || r.prop('Code')); if (bp && bp.text) body = bp.text() || ''; } catch (_e) {}
+          if (!body.trim()) { try { const items = await r.getLineItems(); body = (items || []).map((li) => (li.segments || []).map((s) => (typeof s.text === 'string' ? s.text : (s.text && s.text.title) || '')).join('')).join('\n'); } catch (_e) {} }
+          if (!body.trim()) continue;
+          const safe = name.replace(/[^A-Za-z0-9_$]/g, '_');
+          this._userFns[safe] = new Function('tp', 'ctx', 'args', '"use strict"; return (async () => { ' + body + ' })();');
+        } catch (_e) {}
+      }
+    } catch (_e) {}
+  }
   buildTp(ctx) {
     const plugin = this;
     const fmt = (d, f) => plugin.formatDate(d, f || null);
@@ -676,7 +716,7 @@ class Plugin extends AppPlugin {
     };
     const weekdayName = (d) => ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][d.getDay()];
 
-    return {
+    const _tp = {
       config: {
         run_mode: "apply",
         templateName: ctx.templateName || "",
@@ -747,6 +787,24 @@ class Plugin extends AppPlugin {
         },
       },
     };
+    // TS-5: tp.user.<name>(...args) — reusable functions loaded from a `Template Functions` collection.
+    _tp.user = {};
+    for (const name of Object.keys(plugin._userFns || {})) { _tp.user[name] = (...args) => plugin._userFns[name](_tp, ctx, args); }
+    // TS-9: tp.brain.* — the note is born summarizing its own graph context (neighbours + its open tasks).
+    _tp.brain = {
+      neighbours: async () => {
+        const rec = ctx.record; if (!rec) return []; const out = [];
+        try { const back = await rec.getBackReferences(); for (const br of (back || [])) { const r = br && br.record; if (r && r.getName) out.push(r.getName()); } } catch (e) {}
+        try { const items = await rec.getLineItems(); for (const li of (items || [])) for (const s of (li.segments || [])) { if (s && s.type === 'ref' && s.text && s.text.guid) { try { const t = await plugin.data.getRecord(s.text.guid); if (t && t.getName) out.push(t.getName()); } catch (e) {} } } } catch (e) {}
+        return [...new Set(out.filter(Boolean))];
+      },
+      openTasks: async () => {
+        const rec = ctx.record; if (!rec) return []; const out = [];
+        try { const items = await rec.getLineItems(); for (const li of (items || [])) { let st = null; try { st = li.getTaskStatus && li.getTaskStatus(); } catch (e) {} if (st != null && st !== 'done') out.push((li.segments || []).map((s) => (typeof s.text === 'string' ? s.text : (s.text && s.text.title) || '')).join('').trim()); } } catch (e) {}
+        return out.filter(Boolean);
+      },
+    };
+    return _tp;
   }
 
   // ========================================================================
@@ -1003,7 +1061,16 @@ class Plugin extends AppPlugin {
     // Parse frontmatter + strip from body.
     const parsed = this.parseFrontmatter(rendered);
     const frontmatter = parsed.frontmatter;
-    const bodyAll = parsed.body;
+    let bodyAll = parsed.body;
+    // IO-5/TS-1 + TS-8: `plexus: hybrid|mindmap` is a DIRECTIVE (flip the new record to a drawing / build a mind map),
+    // not a record property. TS-3/TS-10: collect {{relate}}/{{banner}} directive markers to apply after create.
+    const plexusDir = frontmatter ? String(frontmatter.plexus || '').trim().toLowerCase() : '';
+    const wantMindmap = /^mind ?map$/.test(plexusDir);
+    const wantHybrid = /^(hybrid|drawing|canvas|true|yes)$/.test(plexusDir);
+    if (frontmatter && 'plexus' in frontmatter) delete frontmatter.plexus;
+    const relates = []; const RELATE_RE = /<!--PLEXUS-RELATE:([^=]+)=([^>]+?)-->/g; let _rm;
+    while ((_rm = RELATE_RE.exec(bodyAll)) !== null) relates.push({ field: _rm[1].trim(), guid: _rm[2].trim() });
+    let bannerUrl = null; const _bm = bodyAll.match(/<!--PLEXUS-BANNER:(https?:\/\/[^>]+?)-->/); if (_bm) bannerUrl = _bm[1];
 
     // Title: prefer an explicit frontmatter `Title:` (composed from the record's properties),
     // else fall back to the first non-empty body line. When the title comes from frontmatter,
@@ -1062,9 +1129,21 @@ class Plugin extends AppPlugin {
       await this.applyFrontmatter(targetRecord, frontmatter);
     }
 
-    // Body -> native nested line items (segment-aware).
+    // Body -> native nested line items (segment-aware). Strip the directive markers first (not content).
+    if (relates.length) bodyForWrite = bodyForWrite.replace(/<!--PLEXUS-RELATE:[^>]+?-->/g, '');
+    if (bannerUrl) bodyForWrite = bodyForWrite.replace(/<!--PLEXUS-BANNER:[^>]+?-->/g, '');
+    let cursorGuid = null;
     if (bodyForWrite.trim()) {
-      await this.writeBody(targetRecord, bodyForWrite);
+      cursorGuid = await this.writeBody(targetRecord, bodyForWrite); // TP-3: {{cursor}} target line
+    }
+
+    // TS-3: relation-wiring — set typed record-relation properties (Brain reads these as edges).
+    for (const rel of relates) {
+      try { const p = targetRecord.prop && targetRecord.prop(rel.field); if (p) { if (p.addValue) p.addValue(rel.guid); else if (p.set) p.set(rel.guid); } } catch (e) { console.warn('[Templater] relate failed', rel, e); }
+    }
+    // TS-10: fetch the {{banner:URL}} image and set the record banner (best-effort; CORS/blocked URLs degrade).
+    if (bannerUrl && targetRecord.setBannerFromBlob) {
+      try { const resp = await fetch(bannerUrl); if (resp && resp.ok) { const ab = await resp.blob(); const blob = await this.data.uploadBlob(new File([ab], 'banner.png', { type: ab.type || 'image/png' })); if (blob) targetRecord.setBannerFromBlob(blob); } } catch (e) { console.warn('[Templater] banner fetch failed:', e); }
     }
 
     // Update lastUsed on the template.
@@ -1082,6 +1161,19 @@ class Plugin extends AppPlugin {
       (createdNewGuid ? ("Created \"" + title + "\"") : (updateMode ? ("Updated \"" + (targetRecord.getName ? targetRecord.getName() : title) + "\"") : "Appended to current record")) +
       (targetCollection && targetCollection.getName ? (" in " + targetCollection.getName()) : "")
     );
+
+    // TS-8: "born as a mind map" — flip the new record into a drawing AND build a mind map from its headings.
+    if (wantMindmap && createdNewGuid) {
+      try { if (typeof window !== 'undefined' && window.__plexusCanvas && window.__plexusCanvas.mindMapFromNote) { await window.__plexusCanvas.mindMapFromNote(targetRecord.guid); return targetRecord.guid; } this.toast("Templater", "plexus: mindmap needs the Plexus Canvas plugin installed."); } catch (e) { console.warn('[Templater] mindMapFromNote failed:', e); }
+    }
+    // IO-5/TS-1: "born hybrid" — flip the new record into a Plexus drawing via the cross-plugin seam.
+    if (wantHybrid && createdNewGuid) {
+      try { if (typeof window !== 'undefined' && window.__plexusCanvas && window.__plexusCanvas.attachScene) { await window.__plexusCanvas.attachScene(targetRecord.guid, true); return targetRecord.guid; } this.toast("Templater", "plexus: hybrid needs the Plexus Canvas plugin installed."); } catch (e) { console.warn('[Templater] attachScene failed:', e); }
+    }
+    // TP-3: if the template had a {{cursor}}, jump to that line (highlighted) so the user lands ready to type.
+    if (cursorGuid) {
+      try { const cp = this.ui.getActivePanel && this.ui.getActivePanel(); if (cp && cp.navigateTo) { const ok = await cp.navigateTo({ itemGuid: cursorGuid, highlight: true }); if (ok !== false) return targetRecord.guid; } } catch (e) { console.warn('[Templater] cursor nav failed:', e); }
+    }
 
     // Navigate to the new record (GUARDRAIL #3 — await Promise<boolean>).
     if (createdNewGuid) {
@@ -1290,13 +1382,16 @@ class Plugin extends AppPlugin {
     const stack = []; // [{level, item}]
     const ROOT = {};
     const lastChildOf = new Map();
+    let cursorGuid = null; // TP-3: the line carrying {{cursor}} (navigated-to after apply)
     for (const raw of lines) {
       if (!raw.trim()) continue;
       const indentMatch = raw.match(/^([\t ]*)/);
       const indentStr = indentMatch ? indentMatch[1] : "";
       const spaces = indentStr.replace(/\t/g, '  ').length;
       const level = Math.floor(spaces / 2);
-      const line = raw.trim();
+      let line = raw.trim();
+      let wantCursor = false;
+      if (line.includes('<!--PLEXUS-CURSOR-->')) { wantCursor = true; line = line.replace(/<!--PLEXUS-CURSOR-->/g, '').trim(); }
 
       let type = 'text';
       let content = line;
@@ -1352,8 +1447,10 @@ class Plugin extends AppPlugin {
       if (created) {
         lastChildOf.set(parentKey, created);
         if (nestable) stack.push({ level, item: created });
+        if (wantCursor && created.guid) cursorGuid = created.guid; // TP-3
       }
     }
+    return cursorGuid;
   }
 
   // Segment-aware tokenizer. Emits ref / datetime / hashtag / bold / italic / code segments
@@ -1389,8 +1486,10 @@ class Plugin extends AppPlugin {
         if (!tag.startsWith('#')) tag = '#' + tag;
         segments.push({ type: 'hashtag', text: tag });
       } else if (m[1] === "DATE") {
-        // datetime segment — text is a Thymer-parseable date string ("today","tomorrow",ISO).
-        segments.push({ type: 'datetime', text: m[2] });
+        // TP-1: datetime segment — prefer the canonical DateTime.parseDateTimeString().value() object (rule 42:
+        // a bare string can render blank / not schedule); fall back to the raw string if DateTime is unavailable.
+        let val = null; try { if (typeof DateTime !== 'undefined' && DateTime.parseDateTimeString) val = DateTime.parseDateTimeString(m[2]).value(); } catch (_e) {}
+        segments.push(val ? { type: 'datetime', text: val } : { type: 'datetime', text: m[2] });
       } else if (m[3] !== undefined) {
         segments.push({ type: 'bold', text: m[3] });
       } else if (m[4] !== undefined) {
@@ -1486,12 +1585,18 @@ class Plugin extends AppPlugin {
   // Auto-apply on record.created  (Triggers auto:<Collection>)
   // ========================================================================
 
+  // TS-7: does a record carry the #auto (or #templater/auto) sentinel that opts a REMOTE creation into auto-apply?
+  async recordHasAutoSentinel(r) {
+    try { const items = await r.getLineItems(); for (const li of (items || [])) for (const s of (li.segments || [])) { if (s && s.type === 'hashtag' && /^#(auto|templater\/auto)$/i.test(String(s.text || ''))) return true; } } catch (e) {}
+    return false;
+  }
   async onRecordCreated(ev) {
     try {
       if (!ev) return;
-      // Only react to LOCAL creations — a '*' listener fires on every connected client, so
-      // without this guard each client would auto-apply against the same new record.
-      if (ev.source && ev.source.isLocal === false) return;
+      // Only react to LOCAL creations by default — a '*' listener fires on every connected client, so without
+      // this guard each client would auto-apply against the same new record. TS-7: a REMOTE creation (MCP agent /
+      // cron) DOES auto-apply when the new record carries an explicit #auto sentinel tag — headless minting.
+      const remote = ev.source && ev.source.isLocal === false;
 
       const recGuid = ev.recordGuid;
       const collGuid = ev.collectionGuid;
@@ -1499,6 +1604,7 @@ class Plugin extends AppPlugin {
 
       // Per-record loop guard (consulted before any await to close the re-entrancy window).
       if (this._state.autoFired.has(recGuid)) return;
+      if (remote) { let ok = false; try { const r = await this.data.getRecord(recGuid); if (r) ok = await this.recordHasAutoSentinel(r); } catch (e) {} if (!ok) return; }
 
       // Self-collection skip FIRST — never auto-apply onto a Templates or audit record,
       // and don't even look up a template for them.
