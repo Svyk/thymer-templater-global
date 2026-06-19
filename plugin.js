@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.18.0 loaded — global AppPlugin (TP-17 dedup palette: sidebar item renamed so only ONE "Apply Template…" shows)', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.19.0 loaded — global AppPlugin (TP-17 dedup: sidebar renamed + bottom-bar item removed → ONE "Apply Template…")', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -81,15 +81,8 @@ class Plugin extends AppPlugin {
       if (side && side.remove) this._state.disposers.push(() => { try { side.remove(); } catch (e) {} });
     } catch (e) { console.warn('[Templater] sidebar add failed:', e); }
 
-    try {
-      const sbar = this.ui.addStatusBarItem({
-        label: "Templates",
-        icon: "ti-copy",
-        tooltip: "Quick-apply a template",
-        onClick: () => plugin.openPicker()
-      });
-      if (sbar && sbar.remove) this._state.disposers.push(() => { try { sbar.remove(); } catch (e) {} });
-    } catch (e) { console.warn('[Templater] statusbar add failed:', e); }
+    // TP-17: status-bar item removed by user request — "Apply Template…" lives in the command
+    // palette (Cmd+K) and the sidebar ("Templater"); a third bottom-bar copy was redundant.
 
     // --- slash /tmpl emulation (GUARDRAIL #4) ---
     try {
