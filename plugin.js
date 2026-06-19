@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.15.0 loaded — global AppPlugin (TP-13: runtime Fill-this-record vs Create-new chooser)', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.16.0 loaded — global AppPlugin (TP-13 fill-vs-create chooser + TP-14 empty bullet/task body fix)', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -1474,22 +1474,26 @@ class Plugin extends AppPlugin {
       } else if (/^>\s+/.test(line)) {
         type = 'quote';
         content = line.replace(/^>\s+/, '');
-      } else if (/^[-*+]\s+\[[ xX]\]\s+/.test(line)) {
-        type = 'task';
-        content = line.replace(/^[-*+]\s+\[[ xX]\]\s+/, '');
-      } else if (/^[-*+]\s+/.test(line)) {
-        type = 'ulist';
-        content = line.replace(/^[-*+]\s+/, '');
-      } else if (/^\d+\.\s+/.test(line)) {
-        type = 'olist';
-        content = line.replace(/^\d+\.\s+/, '');
       } else if (/^(-{3,}|\*{3,}|_{3,})$/.test(line)) {
-        // Markdown horizontal rule (`---`, `***`, `___`). The SDK's PluginLineItemType
-        // enum has NO 'hr' member, so createLineItem(type='hr') is rejected and the
-        // separator is silently dropped. Render the divider as a plain `text` line (a
-        // supported type) so the rule survives in the written output.
+        // Markdown horizontal rule (`---`, `***`, `___`) — checked BEFORE the bullet rules
+        // so `---` isn't mis-read as an empty bullet. The SDK's PluginLineItemType enum has
+        // NO 'hr' member (createLineItem(type='hr') is rejected), so render it as a plain
+        // `text` divider (a supported type) — the rule survives in the written output.
         type = 'text';
         content = '———';
+      } else if (/^[-*+]\s*\[[ xX]\]/.test(line)) {
+        // Task — content OPTIONAL. `- [ ]` with no trailing text => a real EMPTY task line
+        // (was previously dropped to a "[ ]" plain bullet because the old regex demanded text).
+        type = 'task';
+        content = line.replace(/^[-*+]\s*\[[ xX]\]\s*/, '');
+      } else if (/^[-*+](?:\s+.*)?$/.test(line)) {
+        // Bullet — content OPTIONAL. A bare `-` / `- ` => a real EMPTY bullet line (was
+        // previously written as the literal text "-"). `---` is handled by the HR branch above.
+        type = 'ulist';
+        content = line.replace(/^[-*+]\s*/, '');
+      } else if (/^\d+\.(?:\s+.*)?$/.test(line)) {
+        type = 'olist';
+        content = line.replace(/^\d+\.\s*/, '');
       }
 
       const nestable = (type === 'ulist' || type === 'olist' || type === 'task');
@@ -1502,7 +1506,8 @@ class Plugin extends AppPlugin {
         stack.length = 0;
       }
 
-      const segments = this.parseInlineSegments(content);
+      let segments = this.parseInlineSegments(content);
+      if (!segments.length) segments = [{ type: 'text', text: '' }];  // empty bullet/task still needs a segment
       const parentKey = parentItem || ROOT;
       const afterItem = lastChildOf.get(parentKey) || null;
       let created = null;
