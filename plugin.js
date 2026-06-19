@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.13.0 loaded — global AppPlugin', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.14.0 loaded — global AppPlugin (TP-12: relative-offset milestone dates {{date:+N@Anchor}})', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -522,8 +522,9 @@ class Plugin extends AppPlugin {
 
     // {{date}} and {{date:FMT|natural-language}} -> survivable DATE marker (becomes a
     // datetime segment in body context; collapses to plain text in frontmatter/preview).
+    // TP-12: also resolves relative-offset milestone dates ({{date:+7}}, {{date:+7@Start Date}}) — ctx-aware.
     out = out.replace(/\{\{date(?::([^}]+))?\}\}/g, (_, fmt) => {
-      const ds = this.dateStringForSegment(fmt);
+      const ds = this.dateStringForSegment(fmt, ctx);
       return M_OPEN + "DATE" + M_SEP + ds + M_CLOSE;
     });
 
@@ -568,10 +569,18 @@ class Plugin extends AppPlugin {
   // Resolve a {{date:...}} payload into a Thymer-parseable date STRING.
   // Bare {{date}} -> "today"; natural language passes through verbatim ("tomorrow",
   // "next monday", "+3 days"); only an explicit strftime-style FMT is pre-resolved to ISO.
-  dateStringForSegment(fmt) {
+  dateStringForSegment(fmt, ctx) {
     if (!fmt) return "today";
     const f = String(fmt).trim();
     if (!f) return "today";
+    // TP-12 relative-offset milestones (resolved to a concrete ISO so they become real schedulable dates):
+    //   {{date:+7@Start Date}} / {{date:+7 from Start Date}}  -> N days from the prompted "Start Date" answer
+    //   {{date:+7}} / {{date:-3}}                              -> today ± N days
+    // A whole milestone schedule keys off ONE prompted start date instead of each line off "today".
+    let mo = f.match(/^([+-]?\d+)\s*(?:@|from\s+)\s*(.+)$/i);
+    if (mo) return this._isoOffset(this._resolveAnchorDate(mo[2].trim(), ctx), parseInt(mo[1], 10));
+    mo = f.match(/^([+-]\d+)$/);
+    if (mo) return this._isoOffset(new Date(), parseInt(mo[1], 10));
     // strftime-ish format string -> resolve now to a concrete date. (Single M/D omitted from
     // detection to avoid catching natural language; they still RESOLVE in formatDate.)
     if (/(YYYY|YY|MMMM|MMM|MM|DD|dddd|ddd|HH|mm|ss)/.test(f)) {
@@ -579,6 +588,26 @@ class Plugin extends AppPlugin {
     }
     // Natural-language / relative: hand the raw string to Thymer's parser.
     return f;
+  }
+  // TP-12: the date answered in the prompt labelled <label> (parsed to a JS Date); falls back to today
+  // when the anchor is unanswered/unparseable, so an offset milestone always resolves to a real date.
+  _resolveAnchorDate(label, ctx) {
+    let s = ctx && ctx.prompts && ctx.prompts[label];
+    if (Array.isArray(s)) s = s[0];
+    if (s == null || !String(s).trim()) return new Date();
+    s = String(s).trim();
+    try { if (typeof DateTime !== 'undefined' && DateTime.parseDateTimeString) { const dt = DateTime.parseDateTimeString(s); if (dt && dt.toDate && dt.toDate()) return dt.toDate(); } } catch (_e) {}
+    // A bare ISO 'YYYY-MM-DD' must parse as LOCAL midnight, not UTC (new Date('2026-07-01')
+    // is UTC -> reads back as the previous day in Pacific; recurring PDT/UTC off-by-one).
+    const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (iso) return new Date(+iso[1], +iso[2] - 1, +iso[3]);
+    const d = new Date(s); return isNaN(d.getTime()) ? new Date() : d;
+  }
+  _isoOffset(base, n) {
+    const d = base ? new Date(base) : new Date();
+    d.setDate(d.getDate() + (n || 0));
+    const y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, '0'), da = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${da}`;
   }
 
   formatDate(d, fmt) {
