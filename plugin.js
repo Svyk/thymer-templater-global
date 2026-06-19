@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.17.0 loaded — global AppPlugin (TP-15 {{task:}}→Rich Tasks records + TP-16 dropdown none/＋New)', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.18.0 loaded — global AppPlugin (TP-17 dedup palette: sidebar item renamed so only ONE "Apply Template…" shows)', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -73,7 +73,7 @@ class Plugin extends AppPlugin {
 
     try {
       const side = this.ui.addSidebarItem({
-        label: "Apply Template...",
+        label: "Templater",
         icon: "ti-files",
         tooltip: "Render and apply a template",
         onClick: () => plugin.openPicker()
