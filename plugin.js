@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.16.0 loaded — global AppPlugin (TP-13 fill-vs-create chooser + TP-14 empty bullet/task body fix)', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.17.0 loaded — global AppPlugin (TP-15 {{task:}}→Rich Tasks records + TP-16 dropdown none/＋New)', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -315,6 +315,21 @@ class Plugin extends AppPlugin {
       }
       const finalize = async (promptValues) => {
         if (promptValues == null) return;
+        // TP-16: resolve "＋ New …" record picks — prompt for a name, create the record in the
+        // target collection, and substitute its name so the relation resolves on render.
+        for (const pr of prompts) {
+          if (!pr.recordCollection) continue;
+          const mk = async (val) => {
+            if (val !== '__CREATE_NEW__') return val;
+            const nm = await this.asyncPrompt('New ' + pr.recordCollection.replace(/s$/, '') + ' name', '');
+            if (!nm || !nm.trim()) return '';
+            try { const coll = await this.collectionByName(pr.recordCollection); if (coll) { const g = coll.createRecord(nm.trim()); if (g) await this.pollRecord(g); } } catch (e) { console.warn('[Templater] create-new failed', e); }
+            return nm.trim();
+          };
+          const cur = promptValues[pr.label];
+          if (Array.isArray(cur)) { const out = []; for (const x of cur) { const r = await mk(x); if (r) out.push(r); } promptValues[pr.label] = out; }
+          else promptValues[pr.label] = await mk(cur);
+        }
         let rendered;
         try {
           rendered = await this.renderTemplate(content, {
@@ -592,6 +607,12 @@ class Plugin extends AppPlugin {
       const guid = await this.resolveRefGuid(nameOrGuid.trim());
       return guid ? `<!--PLEXUS-RELATE:${field.trim()}=${guid}-->` : '';
     });
+
+    // TP-15: {{task: Title | status=To Do | priority=High | context=Computer | due=+3 days}}
+    // A directive that becomes a real Rich Tasks RECORD after apply (linked to the new record),
+    // NOT a body line item. The title may use {{prompt:…}} (already resolved above). Encoded so
+    // commas/pipes survive into the post-apply spawner; stripped from the body before it is written.
+    out = out.replace(/\{\{task:([^}]+?)\}\}/g, (_, body) => '<!--TMPL-TASK:' + encodeURIComponent(body.trim()) + '-->');
 
     // <%* js %> sandbox (async tp.* namespace)
     out = await this.replaceAsync(out, /<%\*([\s\S]*?)%>/g, async (_, code) => {
@@ -989,7 +1010,7 @@ class Plugin extends AppPlugin {
     modal.className = 'tmpl-modal';
     modal.innerHTML = `<h2>Apply: ${this.escape(tName)}</h2><div class="tmpl-sub">${prompts.length} variable${prompts.length === 1 ? '' : 's'} to fill in</div>`;
     const fields = [];
-    prompts.forEach(({ label, defaultValue, choices, multi }) => {
+    prompts.forEach(({ label, defaultValue, choices, multi, recordCollection }) => {
       const wrap = document.createElement('div');
       wrap.className = 'tmpl-field';
       const labelEl = document.createElement('label');
@@ -999,13 +1020,25 @@ class Plugin extends AppPlugin {
       if (choices && choices.length) {
         // Choice / record property -> dropdown. Multi-record -> multi-select.
         input = document.createElement('select');
-        if (multi) { input.multiple = true; input.size = Math.min(Math.max(choices.length, 2), 6); }
+        if (multi) { input.multiple = true; input.size = Math.min(Math.max(choices.length + 1, 2), 7); }
+        // TP-16: a record-relation prompt that isn't applicable -> "— none —" (single only);
+        // and a "＋ New …" choice that creates the record on the fly (handled in finalize).
+        const singular = recordCollection ? recordCollection.replace(/s$/, '') : '';
+        if (recordCollection && !multi) {
+          const none = document.createElement('option'); none.value = ''; none.textContent = '— none —';
+          if (!defaultValue) none.selected = true;
+          input.appendChild(none);
+        }
         choices.forEach(opt => {
           const o = document.createElement('option');
           o.value = opt; o.textContent = opt;
           if (!multi && opt === defaultValue) o.selected = true;
           input.appendChild(o);
         });
+        if (recordCollection) {
+          const nw = document.createElement('option'); nw.value = '__CREATE_NEW__'; nw.textContent = '＋ New ' + (singular || 'record') + '…';
+          input.appendChild(nw);
+        }
       } else {
         const low = label.toLowerCase();
         const isLong = low.includes('description') || low.includes('details') || low.includes('notes') || label.length > 30;
@@ -1140,6 +1173,9 @@ class Plugin extends AppPlugin {
     const relates = []; const RELATE_RE = /<!--PLEXUS-RELATE:([^=]+)=([^>]+?)-->/g; let _rm;
     while ((_rm = RELATE_RE.exec(bodyAll)) !== null) relates.push({ field: _rm[1].trim(), guid: _rm[2].trim() });
     let bannerUrl = null; const _bm = bodyAll.match(/<!--PLEXUS-BANNER:(https?:\/\/[^>]+?)-->/); if (_bm) bannerUrl = _bm[1];
+    // TP-15: collect {{task:…}} directives — spawned as Rich Tasks records (linked to this record) after apply.
+    const taskDirectives = []; const TASK_RE = /<!--TMPL-TASK:([^>]*?)-->/g; let _tk;
+    while ((_tk = TASK_RE.exec(bodyAll)) !== null) { try { taskDirectives.push(decodeURIComponent(_tk[1])); } catch (e) { taskDirectives.push(_tk[1]); } }
 
     // Title: prefer an explicit frontmatter `Title:` (composed from the record's properties),
     // else fall back to the first non-empty body line. When the title comes from frontmatter,
@@ -1201,10 +1237,15 @@ class Plugin extends AppPlugin {
     // Body -> native nested line items (segment-aware). Strip the directive markers first (not content).
     if (relates.length) bodyForWrite = bodyForWrite.replace(/<!--PLEXUS-RELATE:[^>]+?-->/g, '');
     if (bannerUrl) bodyForWrite = bodyForWrite.replace(/<!--PLEXUS-BANNER:[^>]+?-->/g, '');
+    if (taskDirectives.length) bodyForWrite = bodyForWrite.replace(/<!--TMPL-TASK:[^>]*?-->/g, '');
     let cursorGuid = null;
     if (bodyForWrite.trim()) {
       cursorGuid = await this.writeBody(targetRecord, bodyForWrite); // TP-3: {{cursor}} target line
     }
+
+    // TP-15: spawn Rich Tasks records from {{task:}} directives, each linked to the new/target record.
+    let spawnedTasks = 0;
+    for (const td of taskDirectives) { const g = await this.spawnRichTask(td, targetRecord, targetCollection); if (g) spawnedTasks++; }
 
     // TS-3: relation-wiring — set typed record-relation properties (Brain reads these as edges).
     for (const rel of relates) {
@@ -1256,6 +1297,38 @@ class Plugin extends AppPlugin {
     }
 
     return targetRecord.guid;
+  }
+
+  // TP-15: create one Rich Tasks record from a `Title | key=val | …` directive, linked to the
+  // record the template just produced. status/priority/context/energy map to the Rich Tasks
+  // choice props (labels match exactly); due is any datetime string ("+3 days", "next friday").
+  async spawnRichTask(directive, targetRecord, targetCollection) {
+    try {
+      const parts = String(directive).split('|').map(s => s.trim());
+      const title = (parts[0] || '').trim();
+      if (!title) return null;
+      const attrs = {};
+      for (const seg of parts.slice(1)) { const i = seg.indexOf('='); if (i > 0) attrs[seg.slice(0, i).trim().toLowerCase()] = seg.slice(i + 1).trim(); }
+      const coll = await this.collectionByName('Rich Tasks');
+      if (!coll) { this.toast('Templater', 'No "Rich Tasks" collection — task not created.'); return null; }
+      const guid = coll.createRecord(title);
+      if (!guid) return null;
+      const rec = await this.pollRecord(guid);
+      if (!rec) return guid;
+      const set = (label, val) => { if (val == null || val === '') return; try { const p = rec.prop && rec.prop(label); if (p) this.applyPropertyValue(p, label, String(val)); } catch (e) {} };
+      set('Task Status', attrs.status || 'To Do');
+      set('Priority', attrs.priority);
+      set('Context', attrs.context);
+      set('Energy', attrs.energy);
+      set('Due', attrs.due);
+      // Link to the record we just created: Project relation for a Project, Area relation for an Area.
+      try {
+        const cn = targetCollection && targetCollection.getName && targetCollection.getName();
+        const linkField = (cn === 'Projects') ? 'Project' : (cn === 'Areas' ? 'Area' : null);
+        if (linkField && targetRecord && targetRecord.guid) { const lp = rec.prop && rec.prop(linkField); if (lp && lp.set) lp.set(targetRecord.guid); }
+      } catch (e) {}
+      return guid;
+    } catch (e) { console.warn('[Templater] spawnRichTask failed', e); return null; }
   }
 
   async resolveTargetCollection(triggers, activeCollection) {
