@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.14.0 loaded — global AppPlugin (TP-12: relative-offset milestone dates {{date:+N@Anchor}})', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.15.0 loaded — global AppPlugin (TP-13: runtime Fill-this-record vs Create-new chooser)', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -299,7 +299,7 @@ class Plugin extends AppPlugin {
     const updateMode = triggers.some(t => /^update current record$/i.test(t));
 
     // Flow: [pick collection] -> fill prompts -> create + fill + open. No preview step.
-    const proceed = async (chosenCollection) => {
+    const proceed = async (chosenCollection, mode) => {
       const prompts = this.collectPrompts(content, vars.defaults);
       // Pre-load record options for {{prompt.record:...}} prompts -> dropdown of record names.
       for (const pr of prompts) {
@@ -331,7 +331,7 @@ class Plugin extends AppPlugin {
           return;
         }
         try {
-          await this.applyTemplate(template, rendered, { collection: chosenCollection });
+          await this.applyTemplate(template, rendered, { collection: chosenCollection, mode });
         } catch (e) {
           console.error('[Templater] apply failed:', e);
           this.toast("Apply failed", String(e && e.message || e));
@@ -341,14 +341,49 @@ class Plugin extends AppPlugin {
       else this.openPromptsModal(template, prompts, finalize);
     };
 
-    // Append/Update operate on the active record — no collection choice.
-    if (appendMode || updateMode) { proceed(null); return; }
-    // Create mode: pin the collection from a Trigger or Variables JSON {"collection":"X"};
-    // only fall back to the picker when the template doesn't say where it belongs.
+    // Author-fixed Append/Update triggers still win (respect an explicitly-tagged template).
+    if (appendMode) { proceed(null, 'append'); return; }
+    if (updateMode) { proceed(null, 'update'); return; }
+
+    // Where would a NEW record go? (trigger-named collection > Variables.collection pin.)
     let pinned = await this.resolveTargetCollection(triggers, null);
     if (!pinned && vars.collection) { try { pinned = await this.collectionByName(String(vars.collection)); } catch (e) {} }
-    if (pinned) { proceed(pinned); return; }
-    this.openCollectionPicker((col) => proceed(col));
+
+    // TP-13: runtime "fill the OPEN record vs create new" chooser. If a real (non-Journal)
+    // record is open, offer to fill it in place; otherwise go straight to create as before.
+    let journalish = false;
+    try { journalish = !!(activeRecord && activeRecord.getJournalDetails && activeRecord.getJournalDetails()); } catch (e) {}
+    if (activeRecord && !journalish) {
+      const activeName = (activeRecord.getName && activeRecord.getName()) || 'current record';
+      const pinName = pinned && pinned.getName && pinned.getName();
+      const activeCollName = activeCollection && activeCollection.getName && activeCollection.getName();
+      const mismatch = !!(pinName && activeCollName && pinName !== activeCollName);
+      const mode = await this.chooseApplyTarget(this.tName(template), activeName, pinName, mismatch);
+      if (mode == null) return;                       // dismissed -> no-op
+      if (mode === 'append' || mode === 'update') { proceed(null, mode); return; }
+      // mode === 'create' falls through to the create flow below.
+    }
+
+    // CREATE: pinned collection, else the active collection, else ask.
+    if (pinned) { proceed(pinned, 'create'); return; }
+    if (activeCollection) { proceed(activeCollection, 'create'); return; }
+    this.openCollectionPicker((col) => proceed(col, 'create'));
+  }
+
+  // TP-13: runtime "where does this template go?" chooser. Returns 'update' | 'append' | 'create' | null.
+  // Thin wrapper over the existing asyncSuggester modal (arrow-key + click + Esc -> -1). First option is
+  // the safe default. When the template is pinned to a DIFFERENT collection than the open record, lead
+  // with Create so we never silently rewrite a record of the wrong type.
+  async chooseApplyTarget(templateName, recordName, pinnedCollName, mismatch) {
+    const fill   = { k: 'update', l: 'Fill this record — set properties, replace title (' + recordName + ')' };
+    const append = { k: 'append', l: 'Append to this record — keep title, add below' };
+    const create = { k: 'create', l: mismatch
+      ? ('Create a NEW record in "' + pinnedCollName + '" instead')
+      : (pinnedCollName ? ('Create a NEW record in "' + pinnedCollName + '"') : 'Create a NEW record') };
+    const opts = mismatch ? [create, fill, append] : [fill, append, create];
+    const idx = await this.asyncSuggester('Apply "' + templateName + '"', opts.map(o => o.l));
+    if (idx < 0 || !opts[idx]) return null;
+    return opts[idx].k;
   }
 
   // Searchable target-collection picker (Thymer-native dropdown — spaces work in its input).
@@ -1084,8 +1119,13 @@ class Plugin extends AppPlugin {
     const activeRecord = panel && panel.getActiveRecord && panel.getActiveRecord();
     const activeCollection = panel && panel.getActiveCollection && panel.getActiveCollection();
 
-    const appendMode = triggers.some(t => /^append to current record$/i.test(t));
-    const updateMode = triggers.some(t => /^update current record$/i.test(t));
+    // Effective mode: an explicit runtime choice (from the picker chooser) wins; otherwise fall
+    // back to the template's authored Triggers (keeps the auto / record-created path unchanged).
+    const triggerAppend = triggers.some(t => /^append to current record$/i.test(t));
+    const triggerUpdate = triggers.some(t => /^update current record$/i.test(t));
+    const optMode = opts && opts.mode;
+    const appendMode = optMode ? optMode === 'append' : triggerAppend;
+    const updateMode = optMode ? optMode === 'update' : triggerUpdate;
 
     // Parse frontmatter + strip from body.
     const parsed = this.parseFrontmatter(rendered);
