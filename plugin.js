@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.20.0 loaded — global AppPlugin (TP-18 date fixes: {{date:+N days}} resolves + display dates render as text + {{task:}} due resolves)', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.21.0 loaded — global AppPlugin (TP-19: schema form — one typed modal from the collection schema for pinned {"form":true} templates)', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -356,6 +356,11 @@ class Plugin extends AppPlugin {
     // Where would a NEW record go? (trigger-named collection > Variables.collection pin.)
     let pinned = await this.resolveTargetCollection(triggers, null);
     if (!pinned && vars.collection) { try { pinned = await this.collectionByName(String(vars.collection)); } catch (e) {} }
+
+    // TP-19: SCHEMA FORM mode — a pinned template with Variables JSON {"form": true} shows ONE
+    // typed form rendered from the collection schema (date pickers / choice dropdowns / record
+    // pickers / number) instead of chained {{prompt}} dialogs. (Create-new only; opt-in per template.)
+    if (vars.form && pinned) { try { await this.applySchemaForm(template, pinned, content, vars); } catch (e) { console.warn('[Templater] schema form failed', e); this.toast('Templater', 'Schema form error: ' + (e && e.message || e)); } return; }
 
     // TP-13: runtime "fill the OPEN record vs create new" chooser. If a real (non-Journal)
     // record is open, offer to fill it in place; otherwise go straight to create as before.
@@ -1074,6 +1079,172 @@ class Plugin extends AppPlugin {
     modal.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit.click(); }
       if (e.key === 'Escape') { e.preventDefault(); cancel.click(); }
+    });
+  }
+
+  // ========================================================================
+  // TP-19: Schema Form — one typed modal rendered from the collection schema
+  // ========================================================================
+
+  // The settable user fields of a collection, typed, from collection.getConfiguration().fields.
+  // Excludes system + dynamic/formula + read-only + inactive + the plugin-internal columns.
+  async _collectionFields(collection) {
+    let cfg = null; try { cfg = collection.getConfiguration(); } catch (_) {}
+    const fields = (cfg && cfg.fields) || [];
+    const SYS = new Set(['title', 'icon', 'created_at', 'updated_at', 'banner', 'collection', 'parent_page']);
+    const SKIP = new Set(['SC Relatedness', 'Scene', 'Canvas Text', 'Source Line']);
+    const TYPES = new Set(['text', 'number', 'choice', 'datetime', 'record', 'url']);
+    let colMap = null;
+    const out = [];
+    for (const f of fields) {
+      if (!f || f.active === false || f.read_only === true) continue;
+      if (SYS.has(f.id) || SKIP.has(f.label)) continue;
+      if (!TYPES.has(f.type)) continue;                       // skip dynamic / file / image / user / banner
+      let targetCollection = '';
+      if (f.type === 'record' && f.filter_colguid) {
+        if (!colMap) { colMap = {}; try { for (const c of (await this.data.getAllCollections())) { try { colMap[c.getGuid()] = c.getName(); } catch (_) {} } } catch (_) {} }
+        targetCollection = colMap[f.filter_colguid] || '';
+      }
+      out.push({ id: f.id, label: f.label, type: f.type, many: !!f.many, choices: ((f.choices || []).map(c => c && c.label).filter(Boolean)), targetCollection });
+    }
+    return out;
+  }
+
+  // Pre-fill values pulled from the template's frontmatter: literal values, {{prompt:.. ?? DEF}}
+  // defaults, and {{date}} -> today for datetime fields. Plus a __title from the Title: line literal.
+  _schemaFormDefaults(content, fields) {
+    const d = {}; const byLabel = new Set(fields.map(f => f.label));
+    const text = String(content || ''); if (!/^---\s*\r?\n/.test(text)) return d;
+    const lines = text.split('\n'); let end = -1;
+    for (let i = 1; i < lines.length; i++) { if (/^---\s*$/.test(lines[i])) { end = i; break; } }
+    if (end < 0) return d;
+    for (let i = 1; i < end; i++) {
+      const m = lines[i].match(/^\s*([^:]+?)\s*:\s*(.*)$/); if (!m) continue;
+      const key = m[1].trim(); const val = m[2].trim();
+      if (key === 'Title' || key === 'title') { const lit = val.replace(/\{\{[^}]*\}\}/g, '').replace(/<%[\s\S]*?%>/g, '').replace(/[·—–-]\s*$/, '').trim(); if (lit) d.__title = lit; continue; }
+      if (!byLabel.has(key)) continue;
+      if (/\{\{date(?::[^}]*)?\}\}/.test(val)) { const f = fields.find(x => x.label === key); d[key] = (f && f.type === 'datetime') ? this._isoOffset(new Date(), 0) : ''; continue; }
+      const pm = val.match(/\{\{prompt[^:]*:[^}]*\?\?\s*([^}]*)\}\}/);
+      if (pm) { const def = pm[1].trim(); if (def && !/\{\{/.test(def)) d[key] = def; continue; }
+      if (val && !/\{\{|<%/.test(val)) d[key] = val;       // literal default
+    }
+    return d;
+  }
+
+  openSchemaForm(template, fields, defaults, recordOptions, onSubmit) {
+    const overlay = document.createElement('div'); overlay.className = 'tmpl-overlay';
+    const modal = document.createElement('div'); modal.className = 'tmpl-modal';
+    const tName = this.tName(template);
+    modal.innerHTML = '<h2>New ' + this.escape(tName) + '</h2><div class="tmpl-sub">' + fields.length + ' field' + (fields.length === 1 ? '' : 's') + ' from the collection schema</div>';
+    const inputs = [];
+    const titleWrap = document.createElement('div'); titleWrap.className = 'tmpl-field';
+    const titleLbl = document.createElement('label'); titleLbl.textContent = 'Title'; titleWrap.appendChild(titleLbl);
+    const titleIn = document.createElement('input'); titleIn.type = 'text'; if (defaults.__title) titleIn.value = defaults.__title; this.attachInputGuards(titleIn); titleWrap.appendChild(titleIn); modal.appendChild(titleWrap);
+    for (const f of fields) {
+      const wrap = document.createElement('div'); wrap.className = 'tmpl-field';
+      const lbl = document.createElement('label'); lbl.textContent = f.label + (f.many ? ' (⌘-click for multiple)' : ''); wrap.appendChild(lbl);
+      let input; const dv = defaults[f.label];
+      if (f.type === 'choice' && f.choices.length) {
+        input = document.createElement('select');
+        if (f.many) { input.multiple = true; input.size = Math.min(Math.max(f.choices.length + 1, 2), 7); }
+        else { const none = document.createElement('option'); none.value = ''; none.textContent = '— none —'; if (!dv) none.selected = true; input.appendChild(none); }
+        f.choices.forEach(o => { const op = document.createElement('option'); op.value = o; op.textContent = o; if (!f.many && o === dv) op.selected = true; input.appendChild(op); });
+      } else if (f.type === 'record') {
+        input = document.createElement('select'); if (f.many) { input.multiple = true; input.size = 5; }
+        else { const none = document.createElement('option'); none.value = ''; none.textContent = '— none —'; none.selected = true; input.appendChild(none); }
+        (recordOptions[f.label] || []).forEach(nm => { const op = document.createElement('option'); op.value = nm; op.textContent = nm; input.appendChild(op); });
+        const nw = document.createElement('option'); nw.value = '__CREATE_NEW__'; nw.textContent = '＋ New ' + (f.targetCollection ? f.targetCollection.replace(/s$/, '') : 'record') + '…'; input.appendChild(nw);
+      } else if (f.type === 'datetime') {
+        input = document.createElement('input'); input.type = 'date'; if (dv) input.value = dv;
+      } else if (f.type === 'number') {
+        input = document.createElement('input'); input.type = 'number'; if (dv) input.value = dv; this.attachInputGuards(input);
+      } else {
+        const isLong = /description|notes|details|summary/i.test(f.label);
+        input = document.createElement(isLong ? 'textarea' : 'input'); if (!isLong) input.type = (f.type === 'url' ? 'url' : 'text'); if (dv) input.value = dv; this.attachInputGuards(input);
+      }
+      wrap.appendChild(input); inputs.push({ field: f, input }); modal.appendChild(wrap);
+    }
+    const actions = document.createElement('div'); actions.className = 'tmpl-actions';
+    const cancel = document.createElement('button'); cancel.className = 'tmpl-btn'; cancel.textContent = 'Cancel';
+    const submit = document.createElement('button'); submit.className = 'tmpl-btn primary'; submit.textContent = 'Create →';
+    actions.appendChild(cancel); actions.appendChild(submit); modal.appendChild(actions);
+    overlay.appendChild(modal); document.body.appendChild(overlay);
+    setTimeout(() => { try { titleIn.focus(); } catch (_) {} }, 0);
+    let done = false; const close = () => { try { document.body.removeChild(overlay); } catch (_) {} };
+    cancel.onclick = () => { if (done) return; done = true; close(); onSubmit(null); };
+    overlay.onclick = (e) => { if (e.target === overlay) { if (done) return; done = true; close(); onSubmit(null); } };
+    submit.onclick = () => {
+      if (done) return; done = true;
+      const out = { __title: titleIn.value, values: {} };
+      for (const { field, input } of inputs) { out.values[field.label] = (field.many && input.multiple) ? Array.from(input.selectedOptions).map(o => o.value).filter(Boolean) : input.value; }
+      close(); onSubmit(out);
+    };
+    modal.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit.click(); } if (e.key === 'Escape') { e.preventDefault(); cancel.click(); } });
+  }
+
+  async applySchemaForm(template, collection, content, vars) {
+    const fields = await this._collectionFields(collection);
+    if (!fields.length) { this.toast('Templater', 'No settable fields on "' + (collection.getName ? collection.getName() : 'collection') + '".'); return; }
+    const recordOptions = {};
+    for (const f of fields) {
+      if (f.type === 'record' && f.targetCollection) {
+        try { const c = await this.collectionByName(f.targetCollection); if (c) { const recs = await c.getAllRecords(); recordOptions[f.label] = recs.map(r => { try { return r.getName(); } catch (_) { return null; } }).filter(Boolean).sort((a, b) => a.localeCompare(b)); } } catch (_) {}
+      }
+    }
+    const defaults = this._schemaFormDefaults(content, fields);
+    this.openSchemaForm(template, fields, defaults, recordOptions, async (res) => {
+      if (res == null) return;
+      // Resolve "＋ New" record picks: create the record, substitute its name.
+      for (const f of fields) {
+        if (f.type !== 'record') continue;
+        const mk = async (v) => {
+          if (v !== '__CREATE_NEW__') return v;
+          const nm = await this.asyncPrompt('New ' + (f.targetCollection ? f.targetCollection.replace(/s$/, '') : 'record') + ' name', '');
+          if (!nm || !nm.trim()) return '';
+          try { const c = await this.collectionByName(f.targetCollection); if (c) { const g = c.createRecord(nm.trim()); if (g) await this.pollRecord(g); } } catch (_) {}
+          return nm.trim();
+        };
+        const cur = res.values[f.label];
+        if (Array.isArray(cur)) { const o = []; for (const x of cur) { const r = await mk(x); if (r) o.push(r); } res.values[f.label] = o; }
+        else res.values[f.label] = await mk(cur);
+      }
+      // Render ONCE with the form values as prompt answers — resolves a computed Title
+      // (e.g. <%* tp.user.eventId() %>) and the body together.
+      let rendered = '';
+      try { rendered = await this.renderTemplate(content, { record: null, collection, prompts: Object.assign({}, res.values), vars: (vars.defaults || {}), empty: (vars.empty || 'skip'), templateName: this.tName(template) }); } catch (e) { console.warn('[Templater] schema-form render', e); }
+      const parsedSF = this.parseFrontmatter(rendered);
+      const fmT = parsedSF.frontmatter && (parsedSF.frontmatter.Title || parsedSF.frontmatter.title);
+      const renderedTitle = (fmT == null ? '' : String(fmT)).replace(/\s{2,}/g, ' ').replace(/\s*[·—–-]\s*$/, '').trim();
+      const userTitle = (res.__title || '').trim();
+      const title = (userTitle && userTitle !== (defaults.__title || '').trim()) ? userTitle : (renderedTitle || userTitle || this.tName(template));
+      let guid; try { guid = collection.createRecord(title); } catch (e) { this.toast('Apply failed', String(e && e.message || e)); return; }
+      if (!guid) { this.toast('Apply failed', 'createRecord returned no GUID'); return; }
+      const rec = await this.pollRecord(guid);
+      if (!rec) { this.toast('Apply failed', 'could not fetch the new record'); return; }
+      // Set the typed properties from the form.
+      for (const f of fields) {
+        const v = res.values[f.label];
+        if (v == null || v === '' || (Array.isArray(v) && !v.length)) continue;
+        try {
+          const p = rec.prop && rec.prop(f.label); if (!p) continue;
+          if (f.type === 'record') {
+            const names = Array.isArray(v) ? v : [v]; const guids = [];
+            for (const nm of names) { const g = await this.resolveRefGuid(String(nm).trim()); if (g) guids.push(g); }
+            if (guids.length && p.set) p.set(guids.length === 1 ? guids[0] : guids);
+          } else {
+            this.applyPropertyValue(p, f.label, Array.isArray(v) ? v.join(', ') : v);
+          }
+        } catch (_) {}
+      }
+      // Write the BODY (already rendered above; frontmatter + directive markers stripped).
+      try {
+        const body = (parsedSF.body || '').replace(/<!--TMPL-TASK:[^>]*?-->/g, '').replace(/<!--PLEXUS-[^>]*?-->/g, '');
+        if (body.trim()) await this.writeBody(rec, body);
+      } catch (e) { console.warn('[Templater] schema-form body write failed', e); }
+      try { const p = template.prop && template.prop(F_LASTUSED); if (p && p.setFromDate) p.setFromDate(new Date()); } catch (_) {}
+      this.writeAuditRow(template, rec.guid, collection, title, '(schema form)').catch(() => {});
+      this.toast('Applied: ' + this.tName(template), 'Created "' + title + '" in ' + (collection.getName ? collection.getName() : ''));
+      try { const np = this.ui.getActivePanel && this.ui.getActivePanel(); if (np && np.navigateTo) await np.navigateTo({ itemGuid: guid, highlight: true }); } catch (_) {}
     });
   }
 
