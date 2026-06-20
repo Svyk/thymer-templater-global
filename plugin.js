@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.19.0 loaded — global AppPlugin (TP-17 dedup: sidebar renamed + bottom-bar item removed → ONE "Apply Template…")', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.20.0 loaded — global AppPlugin (TP-18 date fixes: {{date:+N days}} resolves + display dates render as text + {{task:}} due resolves)', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -628,8 +628,13 @@ class Plugin extends AppPlugin {
     // A whole milestone schedule keys off ONE prompted start date instead of each line off "today".
     let mo = f.match(/^([+-]?\d+)\s*(?:@|from\s+)\s*(.+)$/i);
     if (mo) return this._isoOffset(this._resolveAnchorDate(mo[2].trim(), ctx), parseInt(mo[1], 10));
-    mo = f.match(/^([+-]\d+)$/);
-    if (mo) return this._isoOffset(new Date(), parseInt(mo[1], 10));
+    // Relative offset from today: "+7", "-3", "+7 days", "+2 weeks", "+3 months", "5 days".
+    mo = f.match(/^([+-]?\d+)\s*(day|days|week|weeks|month|months|year|years)$/i) || f.match(/^([+-]\d+)$/);
+    if (mo) {
+      let n = parseInt(mo[1], 10); const u = (mo[2] || 'day').toLowerCase();
+      if (u.startsWith('week')) n *= 7; else if (u.startsWith('month')) n *= 30; else if (u.startsWith('year')) n *= 365;
+      return this._isoOffset(new Date(), n);
+    }
     // strftime-ish format string -> resolve now to a concrete date. (Single M/D omitted from
     // detection to avoid catching natural language; they still RESOLVE in formatDate.)
     if (/(YYYY|YY|MMMM|MMM|MM|DD|dddd|ddd|HH|mm|ss)/.test(f)) {
@@ -1313,7 +1318,8 @@ class Plugin extends AppPlugin {
       set('Priority', attrs.priority);
       set('Context', attrs.context);
       set('Energy', attrs.energy);
-      set('Due', attrs.due);
+      // Resolve a relative due ("+3 days", "+2 weeks", "today") to a concrete date before setting.
+      set('Due', attrs.due ? this.dateStringForSegment(attrs.due, {}) : '');
       // Link to the record we just created: Project relation for a Project, Area relation for an Area.
       try {
         const cn = targetCollection && targetCollection.getName && targetCollection.getName();
@@ -1629,7 +1635,10 @@ class Plugin extends AppPlugin {
         // TP-1: datetime segment — prefer the canonical DateTime.parseDateTimeString().value() object (rule 42:
         // a bare string can render blank / not schedule); fall back to the raw string if DateTime is unavailable.
         let val = null; try { if (typeof DateTime !== 'undefined' && DateTime.parseDateTimeString) val = DateTime.parseDateTimeString(m[2]).value(); } catch (_e) {}
-        segments.push(val ? { type: 'datetime', text: val } : { type: 'datetime', text: m[2] });
+        // Parses to a real datetime -> a schedulable date chip. Otherwise (a display-only format
+        // like "Fri, Jun 19" with no year) emit the formatted string as PLAIN TEXT, NOT a blank
+        // datetime segment (rule 42: a bare-string datetime renders blank).
+        segments.push(val ? { type: 'datetime', text: val } : { type: 'text', text: m[2] });
       } else if (m[3] !== undefined) {
         segments.push({ type: 'bold', text: m[3] });
       } else if (m[4] !== undefined) {
