@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.22.0 loaded — global AppPlugin (TP-20 {{ai:: }} + AI-fill form button via /llm; TP-21 schema-validating dry-run preview {"preview":true})', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.23.0 loaded — global AppPlugin. <!--PLEXUS-PROMOTE--> directive: after apply, native tasks auto-promote → Rich Tasks (linked) via the Task Engine spine. (TP-20 {{ai:: }}; TP-21 dry-run preview.)', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -1267,10 +1267,12 @@ class Plugin extends AppPlugin {
         } catch (_) {}
       }
       // Write the BODY (already rendered above; frontmatter + directive markers stripped).
+      const wantPromote = /<!--PLEXUS-PROMOTE-->/i.test(parsedSF.body || '');
       try {
         const body = (parsedSF.body || '').replace(/<!--TMPL-TASK:[^>]*?-->/g, '').replace(/<!--PLEXUS-[^>]*?-->/g, '');
         if (body.trim()) await this.writeBody(rec, body);
       } catch (e) { console.warn('[Templater] schema-form body write failed', e); }
+      if (wantPromote) this._promoteAfterApply(rec);
       try { const p = template.prop && template.prop(F_LASTUSED); if (p && p.setFromDate) p.setFromDate(new Date()); } catch (_) {}
       this.writeAuditRow(template, rec.guid, collection, title, '(schema form)').catch(() => {});
       this.toast('Applied: ' + this.tName(template), 'Created "' + title + '" in ' + (collection.getName ? collection.getName() : ''));
@@ -1501,10 +1503,13 @@ class Plugin extends AppPlugin {
     if (relates.length) bodyForWrite = bodyForWrite.replace(/<!--PLEXUS-RELATE:[^>]+?-->/g, '');
     if (bannerUrl) bodyForWrite = bodyForWrite.replace(/<!--PLEXUS-BANNER:[^>]+?-->/g, '');
     if (taskDirectives.length) bodyForWrite = bodyForWrite.replace(/<!--TMPL-TASK:[^>]*?-->/g, '');
+    const wantPromote = /<!--PLEXUS-PROMOTE-->/i.test(bodyForWrite);
+    bodyForWrite = bodyForWrite.replace(/<!--PLEXUS-PROMOTE-->/gi, '');
     let cursorGuid = null;
     if (bodyForWrite.trim()) {
       cursorGuid = await this.writeBody(targetRecord, bodyForWrite); // TP-3: {{cursor}} target line
     }
+    if (wantPromote) this._promoteAfterApply(targetRecord);
 
     // TP-15: spawn Rich Tasks records from {{task:}} directives, each linked to the new/target record.
     let spawnedTasks = 0;
@@ -1773,6 +1778,18 @@ class Plugin extends AppPlugin {
 
     // Plain text.
     try { p.set(String(value)); } catch (e) { console.warn('[Templater] set text prop failed', key, e); }
+  }
+
+  // A template body may carry the directive <!--PLEXUS-PROMOTE--> to mean "after applying, promote my
+  // native tasks → Rich Tasks (linked to this record) via the Task Engine". The new record doesn't exist
+  // at <%* %> render time (the body renders with record:null before createRecord), so this runs POST-apply.
+  async _promoteAfterApply(record) {
+    try {
+      const te = (typeof window !== 'undefined') ? window.__taskEngine : null;
+      if (!record || !record.guid || !te || typeof te.promoteRecordTasks !== 'function') return;
+      await new Promise(r => setTimeout(r, 700)); // let the freshly-written native task lines settle
+      await te.promoteRecordTasks(record.guid);
+    } catch (e) { console.warn('[Templater] post-apply promote failed', e); }
   }
 
   // ----- body writer (segment-aware, nested) -----
@@ -2074,10 +2091,13 @@ class Plugin extends AppPlugin {
       if (parsed.frontmatter && Object.keys(parsed.frontmatter).length) {
         await this.applyFrontmatter(record, parsed.frontmatter);
       }
-      if (parsed.body.trim()) {
+      const wantPromote = /<!--PLEXUS-PROMOTE-->/i.test(parsed.body || '');
+      const updBody = (parsed.body || '').replace(/<!--PLEXUS-PROMOTE-->/gi, '');
+      if (updBody.trim()) {
         // Don't drop the title line — the record already exists with its own name.
-        await this.writeBody(record, parsed.body);
+        await this.writeBody(record, updBody);
       }
+      if (wantPromote) this._promoteAfterApply(record);
       try {
         const p = tmpl.prop && tmpl.prop(F_LASTUSED);
         if (p && p.setFromDate) p.setFromDate(new Date());
