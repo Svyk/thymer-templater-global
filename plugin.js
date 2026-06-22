@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.23.0 loaded — global AppPlugin. <!--PLEXUS-PROMOTE--> directive: after apply, native tasks auto-promote → Rich Tasks (linked) via the Task Engine spine. (TP-20 {{ai:: }}; TP-21 dry-run preview.)', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.24.0 loaded — global AppPlugin. <!--PLEXUS-PROMOTE--> directive: after apply, native tasks auto-promote → Rich Tasks (linked). NEW tp.datacore.{query,count,names,evaluate} — templates compute from LIVE Datacore data at apply time. (TP-20 {{ai:: }}; TP-21 dry-run preview.)', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -886,6 +886,15 @@ class Plugin extends AppPlugin {
     // TS-5: tp.user.<name>(...args) — reusable functions loaded from a `Template Functions` collection.
     _tp.user = {};
     for (const name of Object.keys(plugin._userFns || {})) { _tp.user[name] = (...args) => plugin._userFns[name](_tp, ctx, args); }
+    // tp.datacore.* — run live Plexus Datacore queries AT APPLY TIME so a template computes from real
+    // data: <%* tp.set('n', await tp.datacore.count('@task and not $done')) %> or tp.datacore.names(q).
+    // No-ops gracefully if the Datacore plugin isn't loaded.
+    _tp.datacore = {
+      query: async (q) => { try { const dc = (typeof window !== 'undefined') ? window.__plexusDatacore : null; return (dc && dc.query) ? (await dc.query(String(q || ''))) : []; } catch (e) { return []; } },
+      count: async (q) => { try { const dc = (typeof window !== 'undefined') ? window.__plexusDatacore : null; return (dc && dc.count) ? (await dc.count(String(q || ''))) : 0; } catch (e) { return 0; } },
+      names: async (q) => { try { const dc = (typeof window !== 'undefined') ? window.__plexusDatacore : null; if (!dc || !dc.query) return []; const ids = await dc.query(String(q || '')); const inst = dc._instance; return (ids || []).map((g) => { try { return inst._refName(g); } catch (e) { return g; } }); } catch (e) { return []; } },
+      evaluate: (expr, ix) => { try { const dc = (typeof window !== 'undefined') ? window.__plexusDatacore : null; return (dc && dc.evaluate) ? dc.evaluate(String(expr || ''), ix || null) : null; } catch (e) { return null; } },
+    };
     // TS-9: tp.brain.* — the note is born summarizing its own graph context (neighbours + its open tasks).
     _tp.brain = {
       neighbours: async () => {
