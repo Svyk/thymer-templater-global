@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.24.0 loaded — global AppPlugin. <!--PLEXUS-PROMOTE--> directive: after apply, native tasks auto-promote → Rich Tasks (linked). NEW tp.datacore.{query,count,names,evaluate} — templates compute from LIVE Datacore data at apply time. (TP-20 {{ai:: }}; TP-21 dry-run preview.)', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.25.0 loaded — global AppPlugin. <!--PLEXUS-PROMOTE--> directive: after apply, native tasks auto-promote → Rich Tasks (linked). tp.datacore.{query,count,names,evaluate} — templates compute from LIVE Datacore data at apply time. NEW spine __templater.render / renderTemplateByName for programmatic/headless rendering. (TP-20 {{ai:: }}; TP-21 dry-run preview.)', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -95,6 +95,25 @@ class Plugin extends AppPlugin {
       const autoId = this.events.on("record.created", (ev) => plugin.onRecordCreated(ev), { collection: '*' });
       this._state.eventIds.push(autoId);
     } catch (e) { console.warn('[Templater] auto handler add failed:', e); }
+
+    // Programmatic render seam (verification + cross-plugin use): render a template string with
+    // pre-supplied prompt answers, no UI. Returns the rendered {title, properties, body} string.
+    this._state.render = async (content, prompts) => {
+      try {
+        return await plugin.renderTemplate(String(content || ''), {
+          record: null, collection: null, prompts: prompts || {}, vars: {}, empty: 'skip', templateName: 'spine-render',
+        });
+      } catch (e) { return { error: String(e && e.message || e) }; }
+    };
+    this._state.renderTemplateByName = async (name, prompts) => {
+      try {
+        const records = await plugin.loadTemplatesSorted();
+        const tpl = (records || []).find((r) => plugin.tName(r) === name || (r.getName && r.getName() === name));
+        if (!tpl) return { error: 'template not found: ' + name };
+        const content = plugin.tField(tpl, 'Template Content') || '';
+        return await plugin.renderTemplate(String(content), { record: null, collection: null, prompts: prompts || {}, vars: {}, empty: 'skip', templateName: name });
+      } catch (e) { return { error: String(e && e.message || e) }; }
+    };
 
     console.log('[Templater] commands + slash + auto-apply registered.');
   }
