@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.26.0 loaded — TRIGGERS ENGINE: templates now run on a SCHEDULE, an EVENT, or a CONDITION. Template props: Schedule ("05:00 daily" / "09:00 weekdays" / "Mon,Wed 07:30" / "every 30m"), Trigger On ("record.created:Meetings", "record.updated:Tasks", "journal.open", "app.open"), Condition (Datacore expr / weekday / day / Prop="x" — gate), Target ("journal:today" | "collection:<Name>"). The schedule engine ticks every 60s and CATCHES UP on app-open if a time passed while closed (per-occurrence Last Fired dedup). e.g. Daily Note → Schedule "05:00 daily" + Target "journal:today" appends the rendered template to today\'s journal. Command "Templater: Triggers" lists + test-fires. Spine: __templater.runTrigger/checkSchedulesNow/listTriggers. Plus legacy auto:<Coll>, <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.26.1 loaded — TRIGGERS ENGINE: templates now run on a SCHEDULE, an EVENT, or a CONDITION. Template props: Schedule ("05:00 daily" / "09:00 weekdays" / "Mon,Wed 07:30" / "every 30m"), Trigger On ("record.created:Meetings", "record.updated:Tasks", "journal.open", "app.open"), Condition (Datacore expr / weekday / day / Prop="x" — gate), Target ("journal:today" | "collection:<Name>"). The schedule engine ticks every 60s and CATCHES UP on app-open if a time passed while closed (per-occurrence Last Fired dedup). e.g. Daily Note → Schedule "05:00 daily" + Target "journal:today" appends the rendered template to today\'s journal. Command "Templater: Triggers" lists + test-fires. Spine: __templater.runTrigger/checkSchedulesNow/listTriggers. Plus legacy auto:<Coll>, <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -2401,16 +2401,27 @@ class Plugin extends AppPlugin {
     } catch (e) { console.warn('[Templater] checkSchedules error', e); }
     return { fired };
   }
-  // append-mode idempotence: skip if the day page already contains the template's first heading/line text.
+  // append-mode idempotence: skip if the day page already contains the template's first real heading text
+  // (belt-and-suspenders behind the per-occurrence Last Fired dedup — so a lost stamp can't double-append).
   async _journalAlreadyHas(record, tmpl) {
     try {
-      const head = (this.tContent(tmpl) || '').split('\n').map(s => s.trim()).find(Boolean) || '';
-      const probe = head.replace(/^#+\s*/, '').replace(/\{\{[^}]*\}\}/g, '').trim().slice(0, 24);
-      if (!probe) return false;
+      const probe = this._templateProbe(tmpl); if (!probe) return false;
       const items = await record.getLineItems(false);
       for (const li of (items || [])) { let t = ''; for (const s of (li.segments || [])) if (s && typeof s.text === 'string') t += s.text; if (t.indexOf(probe) >= 0) return true; }
     } catch (e) {}
     return false;
+  }
+  // First distinctive content line of a template: skip frontmatter, heading markers, {{tokens}}, leading
+  // symbols/emoji, and dc:/<%* lines — so the probe is a real heading like "Quick Log", not "---".
+  _templateProbe(tmpl) {
+    const lines = (this.tContent(tmpl) || '').split('\n'); let i = 0;
+    if (lines[0] && lines[0].trim() === '---') { i = 1; while (i < lines.length && lines[i].trim() !== '---') i++; i++; }
+    for (; i < lines.length; i++) {
+      let ln = lines[i].replace(/^#+\s*/, '').replace(/\{\{[^}]*\}\}/g, '').replace(/^[^\w]+/, '').trim();
+      if (/^(dc(\.js)?\s*:|<%)/i.test(ln) || ln === '---') continue;
+      if (ln.length >= 4) return ln.slice(0, 28);
+    }
+    return '';
   }
 
   // --- event handlers ---
