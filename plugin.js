@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.25.0 loaded — global AppPlugin. <!--PLEXUS-PROMOTE--> directive: after apply, native tasks auto-promote → Rich Tasks (linked). tp.datacore.{query,count,names,evaluate} — templates compute from LIVE Datacore data at apply time. NEW spine __templater.render / renderTemplateByName for programmatic/headless rendering. (TP-20 {{ai:: }}; TP-21 dry-run preview.)', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.26.0 loaded — TRIGGERS ENGINE: templates now run on a SCHEDULE, an EVENT, or a CONDITION. Template props: Schedule ("05:00 daily" / "09:00 weekdays" / "Mon,Wed 07:30" / "every 30m"), Trigger On ("record.created:Meetings", "record.updated:Tasks", "journal.open", "app.open"), Condition (Datacore expr / weekday / day / Prop="x" — gate), Target ("journal:today" | "collection:<Name>"). The schedule engine ticks every 60s and CATCHES UP on app-open if a time passed while closed (per-occurrence Last Fired dedup). e.g. Daily Note → Schedule "05:00 daily" + Target "journal:today" appends the rendered template to today\'s journal. Command "Templater: Triggers" lists + test-fires. Spine: __templater.runTrigger/checkSchedulesNow/listTriggers. Plus legacy auto:<Coll>, <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -24,6 +24,15 @@ const F_TRIGGERS = "Triggers";
 const F_VERSION = "Version";
 const F_EXTENDS = "Extends";
 const F_LASTUSED = "lastUsed";
+// Triggers engine (v2.26) — schedule / event / condition based runs.
+const F_SCHEDULE = "Schedule";     // "05:00 daily" | "09:00 weekdays" | "Mon,Wed 07:30" | "1 09:00" | "every 30m"
+const F_TRIGGERON = "Trigger On";  // comma list of: record.created:<Coll> | record.updated:<Coll> | journal.open | app.open
+const F_CONDITION = "Condition";   // predicate gate (Datacore expr, or weekday/day/Prop=val fallback). empty = always.
+const F_TARGET = "Target";         // for schedule/app.open: "journal:today" | "collection:<Name>". events use the trigger record.
+const F_LASTFIRED = "Last Fired";  // engine-written dedup stamp (datetime, synced; localStorage mirrors it)
+const SCHED_TICK_MS = 60000;       // schedule engine tick
+const TRIGGER_TTL_MS = 30000;      // trigger-index cache TTL
+const JOURNAL_COLL_GUID = "16S1WSXAWSHVHJZ72G6J3JRTCP";
 
 // Non-greedy, sentinel-delimited markers carried through render -> segment writer.
 // Encoded as: <U+0001>REF<U+0002><guid><U+0002><label><U+0003>
@@ -46,17 +55,25 @@ class Plugin extends AppPlugin {
       if (window.__templater) {
         (window.__templater.eventIds || []).forEach(id => { try { this.events.off(id); } catch (e) {} });
         (window.__templater.disposers || []).forEach(fn => { try { fn(); } catch (e) {} });
+        if (window.__templater.schedTimer) { try { clearInterval(window.__templater.schedTimer); } catch (e) {} } // GUARDRAIL #21: clear leaked interval
       }
     } catch (e) { /* ignore */ }
+    const _prev = window.__templater || {};
     window.__templater = {
       eventIds: [],
       disposers: [],
-      autoFired: (window.__templater && window.__templater.autoFired) || new Set(),
-      autoCooldown: (window.__templater && window.__templater.autoCooldown) || new Map(),
+      schedTimer: null,
+      autoFired: _prev.autoFired || new Set(),
+      autoCooldown: _prev.autoCooldown || new Map(),
       slashCooldown: new Map(),
       clearing: new Set(),
+      applying: _prev.applying || new Set(),       // records the engine is writing to — guards self-trigger loops
+      lastFired: _prev.lastFired || new Map(),      // tmplGuid -> last-fired occurrence ms (mirrors the Last Fired prop)
+      journalSeen: _prev.journalSeen || new Set(),  // "guid|YYYYMMDD" — journal.open dedup per page per day
+      appOpenFired: false,
       collCache: null,
       autoIndex: null,
+      triggerIndex: null,
     };
     this._state = window.__templater;
 
@@ -96,6 +113,28 @@ class Plugin extends AppPlugin {
       this._state.eventIds.push(autoId);
     } catch (e) { console.warn('[Templater] auto handler add failed:', e); }
 
+    // --- Triggers engine (v2.26): record.updated + journal.open + schedule + app.open ---
+    try {
+      const updId = this.events.on("record.updated", (ev) => plugin.onRecordUpdated(ev), { collection: '*' });
+      this._state.eventIds.push(updId);
+    } catch (e) { console.warn('[Templater] record.updated handler add failed:', e); }
+    try {
+      const navId = this.events.on("panel.navigated", (ev) => plugin.onPanelNavigated(ev));
+      this._state.eventIds.push(navId);
+    } catch (e) { console.warn('[Templater] panel.navigated handler add failed:', e); }
+    // schedule engine — tick every minute; catch-up once shortly after load (fires any time already passed today)
+    try {
+      this._state.schedTimer = setInterval(() => { plugin.checkSchedules('tick'); }, SCHED_TICK_MS);
+      setTimeout(() => { plugin.checkSchedules('catchup'); }, 1500);
+    } catch (e) { console.warn('[Templater] schedule engine start failed:', e); }
+    // app.open — fire once per load for templates with Trigger On: app.open
+    try { setTimeout(() => { plugin.fireAppOpen(); }, 2000); } catch (e) {}
+    // Triggers management command
+    try {
+      const tcmd = this.ui.addCommandPaletteCommand({ label: "Templater: Triggers", icon: "ti-bolt", onSelected: () => plugin.openTriggersPanel() });
+      if (tcmd && tcmd.remove) this._state.disposers.push(() => { try { tcmd.remove(); } catch (e) {} });
+    } catch (e) { console.warn('[Templater] triggers cmd add failed:', e); }
+
     // Programmatic render seam (verification + cross-plugin use): render a template string with
     // pre-supplied prompt answers, no UI. Returns the rendered {title, properties, body} string.
     this._state.render = async (content, prompts) => {
@@ -115,7 +154,12 @@ class Plugin extends AppPlugin {
       } catch (e) { return { error: String(e && e.message || e) }; }
     };
 
-    console.log('[Templater] commands + slash + auto-apply registered.');
+    // Triggers test/diagnostic spine — fire a template's trigger now, or run the schedule check immediately.
+    this._state.runTrigger = async (name) => { try { return await plugin.runTriggerByName(name); } catch (e) { return { error: String(e && e.message || e) }; } };
+    this._state.checkSchedulesNow = async () => { try { return await plugin.checkSchedules('manual'); } catch (e) { return { error: String(e && e.message || e) }; } };
+    this._state.listTriggers = async () => { try { return await plugin.describeTriggers(); } catch (e) { return { error: String(e && e.message || e) }; } };
+
+    console.log('[Templater] commands + slash + auto-apply + triggers engine registered.');
   }
 
   onUnload() {
@@ -2052,31 +2096,25 @@ class Plugin extends AppPlugin {
   async onRecordCreated(ev) {
     try {
       if (!ev) return;
-      // Only react to LOCAL creations by default — a '*' listener fires on every connected client, so without
-      // this guard each client would auto-apply against the same new record. TS-7: a REMOTE creation (MCP agent /
-      // cron) DOES auto-apply when the new record carries an explicit #auto sentinel tag — headless minting.
+      // Only react to LOCAL creations by default — a '*' listener fires on every connected client. TS-7: a
+      // REMOTE creation (MCP agent / cron) auto-applies only when the new record carries an explicit #auto tag.
       const remote = ev.source && ev.source.isLocal === false;
-
-      const recGuid = ev.recordGuid;
-      const collGuid = ev.collectionGuid;
+      const recGuid = ev.recordGuid, collGuid = ev.collectionGuid;
       if (!recGuid || !collGuid) return;
-
-      // Per-record loop guard (consulted before any await to close the re-entrancy window).
+      if (this._state.applying.has(recGuid)) return;      // the engine's own create (create-mode) → don't re-fire
       if (this._state.autoFired.has(recGuid)) return;
-      if (remote) { let ok = false; try { const r = await this.data.getRecord(recGuid); if (r) ok = await this.recordHasAutoSentinel(r); } catch (e) {} if (!ok) return; }
 
-      // Self-collection skip FIRST — never auto-apply onto a Templates or audit record,
-      // and don't even look up a template for them.
       const collName = await this.collectionNameByGuid(collGuid);
       if (!collName) return;
       if (collName === TEMPLATES_COLL || AUDIT_COLL_CANDIDATES.includes(collName)) return;
 
-      // Find an auto template for this collection.
-      const tmpl = await this.findAutoTemplateFor(collName);
-      if (!tmpl) return;
+      // Unified index: legacy auto:<Coll> (Triggers) + new Trigger On: record.created:<Coll>.
+      const idx = await this.getTriggerIndex();
+      const tmpls = idx.byEvent['record.created'][collName] || [];
+      if (!tmpls.length) return;
+      if (remote) { let ok = false; try { const r = await this.data.getRecord(recGuid); if (r) ok = await this.recordHasAutoSentinel(r); } catch (e) {} if (!ok) return; }
 
-      // Loop prevention: per-RECORD sentinel + per-record cooldown (NOT per-collection, so
-      // rapid legitimate creation in the same collection is not throttled).
+      // Loop prevention: per-RECORD sentinel + cooldown.
       const lastRec = this._state.autoCooldown.get(recGuid) || 0;
       if (Date.now() - lastRec < AUTO_COOLDOWN_MS) return;
       this._state.autoFired.add(recGuid);
@@ -2085,55 +2123,15 @@ class Plugin extends AppPlugin {
 
       const record = await this.pollRecord(recGuid);
       if (!record) return;
-
-      // Resolve content (inheritance + includes), render with NO prompts (auto can't prompt).
-      let content = this.tContent(tmpl);
-      if (!content) return;
-      try {
-        const extendsRef = (this.tField(tmpl, F_EXTENDS) || "").trim();
-        if (extendsRef) {
-          const parent = await this.findTemplate(extendsRef);
-          if (parent) { const pc = this.tContent(parent); if (pc) content = pc + "\n" + content; }
-        }
-      } catch (e) {}
-      try { content = await this.resolveIncludes(content, 0, new Set()); } catch (e) {}
-
-      let vars = { defaults: {} };
-      try {
-        const raw = this.tField(tmpl, F_VARS) || this.tField(tmpl, "Variables");
-        if (raw && raw.trim()) { const parsed = JSON.parse(raw); if (parsed && typeof parsed === 'object') vars = Object.assign({ defaults: {} }, parsed); }
-      } catch (e) {}
-      if (!vars.defaults) vars.defaults = {};
-
       const cols = await this.getCollectionsCached();
       const targetCollection = cols.find(c => { try { return c.getGuid && c.getGuid() === collGuid; } catch (e) { return false; } }) || null;
 
-      const rendered = await this.renderTemplate(content, {
-        record, collection: targetCollection,
-        prompts: {}, vars: vars.defaults, empty: vars.empty || "skip",
-        templateName: this.tName(tmpl),
-      });
-
-      // Apply UPDATE-style into the just-created record (props + body), no new record.
-      const parsed = this.parseFrontmatter(rendered);
-      if (parsed.frontmatter && Object.keys(parsed.frontmatter).length) {
-        await this.applyFrontmatter(record, parsed.frontmatter);
+      for (const tmpl of tmpls) {
+        try {
+          if (!(await this.evalCondition(this.conditionOf(tmpl), recGuid))) continue;
+          await this.fireTemplate(tmpl, { record, recGuid, targetCollection, mode: 'update', reason: 'record.created' });
+        } catch (e) { console.warn('[Templater] created-trigger error', e); }
       }
-      const wantPromote = /<!--PLEXUS-PROMOTE-->/i.test(parsed.body || '');
-      const updBody = (parsed.body || '').replace(/<!--PLEXUS-PROMOTE-->/gi, '');
-      if (updBody.trim()) {
-        // Don't drop the title line — the record already exists with its own name.
-        await this.writeBody(record, updBody);
-      }
-      if (wantPromote) this._promoteAfterApply(record);
-      try {
-        const p = tmpl.prop && tmpl.prop(F_LASTUSED);
-        if (p && p.setFromDate) p.setFromDate(new Date());
-      } catch (e) {}
-      try {
-        await this.writeAuditRow(tmpl, recGuid, targetCollection, record.getName ? record.getName() : "(auto)", this.previewText(rendered));
-      } catch (e) {}
-      console.log('[Templater] auto-applied "' + this.tName(tmpl) + '" to new record in ' + collName);
     } catch (e) {
       console.warn('[Templater] auto-apply error:', e);
     }
@@ -2186,6 +2184,313 @@ class Plugin extends AppPlugin {
       const map = await this.getAutoTemplateIndex();
       return map.get(collName) || null;
     } catch (e) { return null; }
+  }
+
+  // ========================================================================
+  // Triggers engine (v2.26) — schedule / event / condition based runs
+  // ========================================================================
+
+  // --- trigger-config readers (text props; empty = unset) ---
+  schedOf(tmpl) { return (this.tField(tmpl, F_SCHEDULE) || '').trim(); }
+  triggerOnOf(tmpl) { return (this.tField(tmpl, F_TRIGGERON) || '').trim(); }
+  conditionOf(tmpl) { return (this.tField(tmpl, F_CONDITION) || '').trim(); }
+  targetOf(tmpl) { return (this.tField(tmpl, F_TARGET) || '').trim(); }
+  guidOf(tmpl) { try { return tmpl.guid || (tmpl.getGuid && tmpl.getGuid()) || null; } catch (e) { return null; } }
+
+  // Last-Fired dedup stamp — in-memory map (fast) + localStorage mirror + the synced datetime prop.
+  stampLastFired(tmpl) {
+    const now = Date.now(); const g = this.guidOf(tmpl);
+    if (g) { this._state.lastFired.set(g, now); try { localStorage.setItem('tmpl-fired-' + g, String(now)); } catch (e) {} }
+    try { const p = tmpl.prop && tmpl.prop(F_LASTFIRED); if (p && p.setFromDate) p.setFromDate(new Date(now)); } catch (e) {}
+  }
+  readLastFired(tmpl) {
+    const g = this.guidOf(tmpl);
+    if (g && this._state.lastFired.has(g)) return this._state.lastFired.get(g);
+    if (g) { try { const ls = localStorage.getItem('tmpl-fired-' + g); if (ls) { const n = parseInt(ls, 10); if (!isNaN(n)) { this._state.lastFired.set(g, n); return n; } } } catch (e) {} }
+    try { const d = tmpl.date && tmpl.date(F_LASTFIRED); if (d && d.getTime) return d.getTime(); } catch (e) {}
+    return 0;
+  }
+
+  // Parse the comma list of event specs from Trigger On + legacy auto:<Coll> in the Triggers choice.
+  triggerEventSpecs(tmpl) {
+    const out = [], seen = new Set();
+    const add = (type, coll) => { const k = type + '|' + (coll || ''); if (!seen.has(k)) { seen.add(k); out.push({ type, coll: coll || null }); } };
+    for (let tok of this.triggerOnOf(tmpl).split(',')) {
+      tok = tok.trim(); if (!tok) continue; let m;
+      if ((m = tok.match(/^record\.created\s*:\s*(.+)$/i))) add('record.created', m[1].trim());
+      else if ((m = tok.match(/^record\.updated\s*:\s*(.+)$/i))) add('record.updated', m[1].trim());
+      else if (/^journal\.open$/i.test(tok)) add('journal.open');
+      else if (/^app\.open$/i.test(tok)) add('app.open');
+    }
+    try { for (const t of this.tTriggers(tmpl)) { const mm = String(t).match(/^auto:\s*(.+)$/i); if (mm) add('record.created', mm[1].trim()); } } catch (e) {}
+    return out;
+  }
+
+  // One scan of the Templates collection → schedules[] + events grouped by type/collection. 30 s TTL.
+  async getTriggerIndex() {
+    const st = this._state;
+    if (st.triggerIndex && (Date.now() - st.triggerIndex.ts) < TRIGGER_TTL_MS) return st.triggerIndex.idx;
+    const idx = { schedules: [], byEvent: { 'record.created': {}, 'record.updated': {}, 'journal.open': [], 'app.open': [] } };
+    try {
+      const cols = await this.getCollectionsCached();
+      const coll = cols.find(c => c && c.getName && c.getName() === TEMPLATES_COLL) || null;
+      if (coll) {
+        const records = await coll.getAllRecords();
+        for (const r of records) {
+          const sched = this.schedOf(r);
+          if (sched) { const spec = this.parseSchedule(sched); if (spec) idx.schedules.push({ tmpl: r, spec }); }
+          for (const ev of this.triggerEventSpecs(r)) {
+            if (ev.type === 'record.created' || ev.type === 'record.updated') { const b = idx.byEvent[ev.type]; (b[ev.coll] = b[ev.coll] || []).push(r); }
+            else if (ev.type === 'journal.open') idx.byEvent['journal.open'].push(r);
+            else if (ev.type === 'app.open') idx.byEvent['app.open'].push(r);
+          }
+        }
+      }
+    } catch (e) { console.warn('[Templater] getTriggerIndex', e); }
+    st.triggerIndex = { ts: Date.now(), idx };
+    return idx;
+  }
+
+  // --- schedule parsing + most-recent-due computation ---
+  parseSchedule(str) {
+    const s = (str || '').trim().toLowerCase(); if (!s) return null; let m;
+    if ((m = s.match(/^every\s+(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours)\b/))) {
+      const n = parseInt(m[1], 10), ms = (m[2][0] === 'h') ? n * 3600000 : n * 60000;
+      if (ms >= 60000) return { kind: 'interval', ms, graceMs: ms, raw: str };
+    }
+    const tm = s.match(/(\d{1,2}):(\d{2})/);
+    const hh = tm ? Math.min(23, parseInt(tm[1], 10)) : 9, mm = tm ? Math.min(59, parseInt(tm[2], 10)) : 0;
+    const WD = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
+    if (/\bweekdays?\b/.test(s)) return { kind: 'dow', days: [1, 2, 3, 4, 5], hh, mm, graceMs: 18 * 3600000, raw: str };
+    if (/\bweekends?\b/.test(s)) return { kind: 'dow', days: [0, 6], hh, mm, graceMs: 18 * 3600000, raw: str };
+    const days = [];
+    for (const tok of s.split(/[,\s]+/)) { const r = tok.match(/^(\w{3})-(\w{3})$/); if (r && (r[1] in WD) && (r[2] in WD)) { for (let i = WD[r[1]]; ; i = (i + 1) % 7) { days.push(i); if (i === WD[r[2]]) break; } } else if (tok.slice(0, 3) in WD) days.push(WD[tok.slice(0, 3)]); }
+    if (days.length) return { kind: 'dow', days: [...new Set(days)], hh, mm, graceMs: 18 * 3600000, raw: str };
+    const dm = s.match(/^(\d{1,2})\s+\d{1,2}:\d{2}/); // "1 09:00" -> monthly day-of-month
+    if (dm) { const d = parseInt(dm[1], 10); if (d >= 1 && d <= 31) return { kind: 'monthday', day: d, hh, mm, graceMs: 18 * 3600000, raw: str }; }
+    return { kind: 'daily', hh, mm, graceMs: 18 * 3600000, raw: str };
+  }
+  lastDue(spec, nowMs) {
+    if (!spec) return null;
+    if (spec.kind === 'interval') return Math.floor(nowMs / spec.ms) * spec.ms;
+    const at = ( d) => { const x = new Date(d); x.setHours(spec.hh, spec.mm, 0, 0); return x.getTime(); };
+    if (spec.kind === 'daily') { const t = at(new Date(nowMs)); return t <= nowMs ? t : at(new Date(nowMs - 86400000)); }
+    if (spec.kind === 'dow') { for (let b = 0; b < 8; b++) { const d = new Date(nowMs - b * 86400000); if (spec.days.indexOf(d.getDay()) >= 0) { const t = at(d); if (t <= nowMs) return t; } } return null; }
+    if (spec.kind === 'monthday') {
+      const now = new Date(nowMs); let y = now.getFullYear(), mo = now.getMonth();
+      let cand = new Date(y, mo, spec.day, spec.hh, spec.mm, 0, 0);
+      if (cand.getTime() > nowMs || cand.getMonth() !== mo) { mo -= 1; if (mo < 0) { mo = 11; y -= 1; } cand = new Date(y, mo, spec.day, spec.hh, spec.mm, 0, 0); }
+      return cand.getTime();
+    }
+    return null;
+  }
+  nextDue(spec, nowMs) {
+    if (!spec) return null;
+    if (spec.kind === 'interval') return (Math.floor(nowMs / spec.ms) + 1) * spec.ms;
+    const at = (d) => { const x = new Date(d); x.setHours(spec.hh, spec.mm, 0, 0); return x.getTime(); };
+    if (spec.kind === 'daily') { const t = at(new Date(nowMs)); return t > nowMs ? t : at(new Date(nowMs + 86400000)); }
+    if (spec.kind === 'dow') { for (let f = 0; f < 8; f++) { const d = new Date(nowMs + f * 86400000); if (spec.days.indexOf(d.getDay()) >= 0) { const t = at(d); if (t > nowMs) return t; } } return null; }
+    if (spec.kind === 'monthday') { const ld = this.lastDue(spec, nowMs); const d = new Date(ld); let mo = d.getMonth() + 1, y = d.getFullYear(); if (mo > 11) { mo = 0; y += 1; } return new Date(y, mo, spec.day, spec.hh, spec.mm, 0, 0).getTime(); }
+    return null;
+  }
+
+  // --- condition evaluator: empty -> true; weekday/day local fallbacks; Datacore; Prop=val ---
+  _truthy(v) { if (v == null) return false; if (typeof v === 'boolean') return v; if (typeof v === 'number') return v !== 0; if (Array.isArray(v)) return v.length > 0; const s = String(v).trim().toLowerCase(); return s !== '' && s !== '0' && s !== 'false' && s !== 'no'; }
+  _evalWeekdayDay(s) {
+    const WD = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']; const now = new Date(); let m;
+    if ((m = s.match(/^weekday\s*(=|in|!=)\s*(.+)$/i))) {
+      const today = WD[now.getDay()]; const set = m[2].toLowerCase().replace(/weekdays?/g, 'mon-fri').replace(/weekends?/g, 'sat,sun'); const days = [];
+      for (const tok of set.split(/[,\s]+/)) { const r = tok.match(/^(\w{3})-(\w{3})$/); if (r) { const a = WD.indexOf(r[1]), b = WD.indexOf(r[2]); if (a >= 0 && b >= 0) for (let i = a; ; i = (i + 1) % 7) { days.push(WD[i]); if (i === b) break; } } else if (WD.indexOf(tok.slice(0, 3)) >= 0) days.push(tok.slice(0, 3)); }
+      const hit = days.indexOf(today) >= 0; return m[1] === '!=' ? !hit : hit;
+    }
+    if ((m = s.match(/^day\s*(=|!=)\s*(\d+)$/i))) { const hit = now.getDate() === parseInt(m[2], 10); return m[1] === '!=' ? !hit : hit; }
+    return null;
+  }
+  _evalRecordProp(s, recordGuid) {
+    if (!recordGuid) return null;
+    const pm = s.match(/^`?([^`=!<>]+?)`?\s*(=|==|!=)\s*"?([^"]*)"?$/); if (!pm) return null;
+    try { const rec = this.data.getRecord(recordGuid); if (!rec) return null; let val = ''; try { val = (rec.text && rec.text(pm[1].trim())) || ''; } catch (e) {} const eq = String(val).trim() === pm[3].trim(); return pm[2] === '!=' ? !eq : eq; } catch (e) { return null; }
+  }
+  async evalCondition(expr, recordGuid) {
+    const s = (expr || '').trim(); if (!s) return true;
+    const wd = this._evalWeekdayDay(s); if (wd !== null) return wd;
+    try {
+      const dc = window.__plexusDatacore;
+      if (dc) {
+        if (/^@/.test(s) && typeof dc.count === 'function') { const n = await dc.count(s); return (typeof n === 'number') ? n > 0 : this._truthy(n); }
+        if (typeof dc.evaluate === 'function') { let r = await dc.evaluate(s, recordGuid || null); if (r && typeof r === 'object' && ('value' in r)) r = r.error ? undefined : r.value; if (r !== undefined) return this._truthy(r); }
+      }
+    } catch (e) {}
+    const pr = this._evalRecordProp(s, recordGuid); if (pr !== null) return pr;
+    return false; // condition specified but unevaluable → don't fire (safe)
+  }
+
+  // --- target resolution + journal record ---
+  async getTodayJournalRecord() {
+    try {
+      const cols = await this.getCollectionsCached();
+      const journal = cols.find(c => { try { return c.isJournalPlugin && c.isJournalPlugin(); } catch (e) { return false; } })
+        || cols.find(c => { try { return c.getGuid && c.getGuid() === JOURNAL_COLL_GUID; } catch (e) { return false; } });
+      if (!journal || !journal.getJournalRecord) return { journal, record: null };
+      const user = (this.data.getActiveUsers && this.data.getActiveUsers()[0]) || null; if (!user) return { journal, record: null };
+      const dt = (typeof DateTime !== 'undefined' && DateTime.parseDateTimeString) ? DateTime.parseDateTimeString('today') : undefined;
+      const record = await journal.getJournalRecord(user, dt);
+      return { journal, record: record || null };
+    } catch (e) { console.warn('[Templater] getTodayJournalRecord', e); return { journal: null, record: null }; }
+  }
+  async resolveTarget(tmpl) {
+    let tgt = this.targetOf(tmpl); if (!tgt) tgt = 'journal:today';
+    if (/^journal(:today|:?$)?$|^today$/i.test(tgt) || /^journal:today$/i.test(tgt)) {
+      const j = await this.getTodayJournalRecord(); if (!j.record) return null;
+      return { record: j.record, recGuid: j.record.guid, targetCollection: j.journal, mode: 'append' };
+    }
+    const cm = tgt.match(/^collection:\s*(.+)$/i);
+    if (cm) { const name = cm[1].trim(); const cols = await this.getCollectionsCached(); const col = cols.find(c => c && c.getName && c.getName().toLowerCase() === name.toLowerCase()) || null; if (!col) return null; return { record: null, recGuid: null, targetCollection: col, mode: 'create' }; }
+    return null;
+  }
+
+  // --- the shared render+apply (extracted from onRecordCreated) used by every trigger path ---
+  async fireTemplate(tmpl, opts) {
+    opts = opts || {}; const mode = opts.mode || 'update';
+    let record = opts.record || null, recGuid = opts.recGuid || null, targetCollection = opts.targetCollection || null;
+    if (mode === 'create') {
+      if (!targetCollection) return false;
+      let guid = null; try { guid = targetCollection.createRecord(this.tName(tmpl) || 'Untitled'); } catch (e) {}
+      if (!guid) return false; recGuid = guid; record = await this.pollRecord(guid); if (!record) return false;
+    }
+    if (!record) return false; if (!recGuid) recGuid = record.guid;
+    if (recGuid) this._state.applying.add(recGuid); // guard: our own writes must not re-trigger record.updated/lineitem
+    try {
+      let content = this.tContent(tmpl); if (!content) return false;
+      try { const ext = (this.tField(tmpl, F_EXTENDS) || '').trim(); if (ext) { const p = await this.findTemplate(ext); if (p) { const pc = this.tContent(p); if (pc) content = pc + "\n" + content; } } } catch (e) {}
+      try { content = await this.resolveIncludes(content, 0, new Set()); } catch (e) {}
+      let vars = { defaults: {} };
+      try { const raw = this.tField(tmpl, F_VARS) || this.tField(tmpl, 'Variables'); if (raw && raw.trim()) { const parsed = JSON.parse(raw); if (parsed && typeof parsed === 'object') vars = Object.assign({ defaults: {} }, parsed); } } catch (e) {}
+      if (!vars.defaults) vars.defaults = {};
+      const rendered = await this.renderTemplate(content, { record, collection: targetCollection, prompts: {}, vars: vars.defaults, empty: vars.empty || 'skip', templateName: this.tName(tmpl) });
+      const parsed = this.parseFrontmatter(rendered);
+      const wantPromote = /<!--PLEXUS-PROMOTE-->/i.test(parsed.body || '');
+      const body = (parsed.body || '').replace(/<!--PLEXUS-PROMOTE-->/gi, '');
+      if (mode !== 'append' && parsed.frontmatter && Object.keys(parsed.frontmatter).length) { try { await this.applyFrontmatter(record, parsed.frontmatter); } catch (e) {} }
+      if (body.trim()) { try { await this.writeBody(record, body); } catch (e) {} }
+      if (wantPromote) this._promoteAfterApply(record);
+      try { const p = tmpl.prop && tmpl.prop(F_LASTUSED); if (p && p.setFromDate) p.setFromDate(new Date()); } catch (e) {}
+      this.stampLastFired(tmpl);
+      try { await this.writeAuditRow(tmpl, recGuid, targetCollection, (record.getName ? record.getName() : '(trigger)'), this.previewText(rendered)); } catch (e) {}
+      console.log('[Templater] trigger fired "' + this.tName(tmpl) + '" (' + (opts.reason || '') + ' · ' + mode + ')');
+      return true;
+    } finally { if (recGuid) setTimeout(() => { try { this._state.applying.delete(recGuid); } catch (e) {} }, 4000); }
+  }
+
+  // --- schedule engine: fire any schedule whose most-recent occurrence hasn't fired yet (catch-up) ---
+  async checkSchedules(reason) {
+    let fired = 0;
+    try {
+      const idx = await this.getTriggerIndex(); const now = Date.now();
+      for (const { tmpl, spec } of idx.schedules) {
+        try {
+          const due = this.lastDue(spec, now); if (due == null) continue;
+          if (now - due > (spec.graceMs || 18 * 3600000)) continue;     // too stale → skip (don't fire a week of missed days)
+          if (this.readLastFired(tmpl) >= due) continue;                 // already fired this occurrence
+          if (!(await this.evalCondition(this.conditionOf(tmpl)))) continue;
+          const tgt = await this.resolveTarget(tmpl); if (!tgt) { console.warn('[Templater] schedule: no target for "' + this.tName(tmpl) + '"'); continue; }
+          if (tgt.mode === 'append' && await this._journalAlreadyHas(tgt.record, tmpl)) { this.stampLastFired(tmpl); continue; } // idempotent on the day page
+          if (await this.fireTemplate(tmpl, Object.assign({ reason: 'schedule:' + (reason || '') }, tgt))) fired++;
+        } catch (e) { console.warn('[Templater] schedule fire error', e); }
+      }
+    } catch (e) { console.warn('[Templater] checkSchedules error', e); }
+    return { fired };
+  }
+  // append-mode idempotence: skip if the day page already contains the template's first heading/line text.
+  async _journalAlreadyHas(record, tmpl) {
+    try {
+      const head = (this.tContent(tmpl) || '').split('\n').map(s => s.trim()).find(Boolean) || '';
+      const probe = head.replace(/^#+\s*/, '').replace(/\{\{[^}]*\}\}/g, '').trim().slice(0, 24);
+      if (!probe) return false;
+      const items = await record.getLineItems(false);
+      for (const li of (items || [])) { let t = ''; for (const s of (li.segments || [])) if (s && typeof s.text === 'string') t += s.text; if (t.indexOf(probe) >= 0) return true; }
+    } catch (e) {}
+    return false;
+  }
+
+  // --- event handlers ---
+  async onRecordUpdated(ev) {
+    try {
+      if (!ev) return; const recGuid = ev.recordGuid, collGuid = ev.collectionGuid; if (!recGuid || !collGuid) return;
+      if (this._state.applying.has(recGuid)) return;                    // our own write → ignore
+      const collName = await this.collectionNameByGuid(collGuid); if (!collName) return;
+      if (collName === TEMPLATES_COLL || AUDIT_COLL_CANDIDATES.includes(collName)) return;
+      const idx = await this.getTriggerIndex(); const tmpls = idx.byEvent['record.updated'][collName] || []; if (!tmpls.length) return;
+      const last = this._state.autoCooldown.get('upd:' + recGuid) || 0; if (Date.now() - last < AUTO_COOLDOWN_MS) return;
+      this._state.autoCooldown.set('upd:' + recGuid, Date.now()); setTimeout(() => { try { this._state.autoCooldown.delete('upd:' + recGuid); } catch (e) {} }, AUTO_COOLDOWN_MS);
+      const record = await this.pollRecord(recGuid); if (!record) return;
+      const cols = await this.getCollectionsCached(); const targetCollection = cols.find(c => { try { return c.getGuid && c.getGuid() === collGuid; } catch (e) { return false; } }) || null;
+      for (const tmpl of tmpls) { try { if (!(await this.evalCondition(this.conditionOf(tmpl), recGuid))) continue; await this.fireTemplate(tmpl, { record, recGuid, targetCollection, mode: 'update', reason: 'record.updated' }); } catch (e) { console.warn('[Templater] updated-trigger error', e); } }
+    } catch (e) { console.warn('[Templater] onRecordUpdated error', e); }
+  }
+  async onPanelNavigated(ev) {
+    try {
+      const panel = ev && ev.panel; if (!panel) return;
+      const rec = (panel.getActiveRecord && panel.getActiveRecord()) || null; if (!rec) return;
+      let jd = null; try { jd = rec.getJournalDetails && rec.getJournalDetails(); } catch (e) {}
+      if (!jd) return;
+      const idx = await this.getTriggerIndex(); const tmpls = idx.byEvent['journal.open']; if (!tmpls || !tmpls.length) return;
+      const recGuid = rec.guid; const dayKey = recGuid + '|' + this._ymd(new Date());
+      if (this._state.journalSeen.has(dayKey)) return; this._state.journalSeen.add(dayKey);
+      const cols = await this.getCollectionsCached(); const jcol = cols.find(c => { try { return c.isJournalPlugin && c.isJournalPlugin(); } catch (e) { return false; } }) || null;
+      for (const tmpl of tmpls) { try { if (!(await this.evalCondition(this.conditionOf(tmpl), recGuid))) continue; if (await this._journalAlreadyHas(rec, tmpl)) continue; await this.fireTemplate(tmpl, { record: rec, recGuid, targetCollection: jcol, mode: 'append', reason: 'journal.open' }); } catch (e) { console.warn('[Templater] journal-open trigger error', e); } }
+    } catch (e) { console.warn('[Templater] onPanelNavigated error', e); }
+  }
+  async fireAppOpen() {
+    try {
+      if (this._state.appOpenFired) return; this._state.appOpenFired = true;
+      const idx = await this.getTriggerIndex(); const tmpls = idx.byEvent['app.open']; if (!tmpls || !tmpls.length) return;
+      for (const tmpl of tmpls) { try { if (!(await this.evalCondition(this.conditionOf(tmpl)))) continue; const tgt = await this.resolveTarget(tmpl); if (!tgt) continue; if (tgt.mode === 'append' && await this._journalAlreadyHas(tgt.record, tmpl)) continue; await this.fireTemplate(tmpl, Object.assign({ reason: 'app.open' }, tgt)); } catch (e) { console.warn('[Templater] app.open trigger error', e); } }
+    } catch (e) { console.warn('[Templater] fireAppOpen error', e); }
+  }
+  _ymd(d) { return '' + d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0'); }
+
+  // --- diagnostics / management ---
+  async runTriggerByName(name) {
+    const tmpl = await this.findTemplate(name); if (!tmpl) return { error: 'template not found: ' + name };
+    const tgt = await this.resolveTarget(tmpl); if (!tgt) return { error: 'no resolvable Target (set Target=journal:today or collection:<Name>)' };
+    const ok = await this.fireTemplate(tmpl, Object.assign({ reason: 'manual' }, tgt));
+    return { fired: ok, template: this.tName(tmpl), target: this.targetOf(tmpl) || 'journal:today', mode: tgt.mode };
+  }
+  async describeTriggers() {
+    const out = []; const now = Date.now();
+    try {
+      const idx = await this.getTriggerIndex();
+      for (const { tmpl, spec } of idx.schedules) out.push({ template: this.tName(tmpl), schedule: spec.raw, kind: spec.kind, nextFire: new Date(this.nextDue(spec, now)).toString().slice(0, 24), lastFired: this.readLastFired(tmpl) ? new Date(this.readLastFired(tmpl)).toString().slice(0, 24) : '—', condition: this.conditionOf(tmpl) || '—', target: this.targetOf(tmpl) || 'journal:today' });
+      const evs = idx.byEvent;
+      for (const t of ['record.created', 'record.updated']) for (const coll in evs[t]) for (const tmpl of evs[t][coll]) out.push({ template: this.tName(tmpl), event: t + ':' + coll, condition: this.conditionOf(tmpl) || '—', target: '(trigger record)' });
+      for (const tmpl of evs['journal.open']) out.push({ template: this.tName(tmpl), event: 'journal.open', condition: this.conditionOf(tmpl) || '—', target: 'opened day page' });
+      for (const tmpl of evs['app.open']) out.push({ template: this.tName(tmpl), event: 'app.open', condition: this.conditionOf(tmpl) || '—', target: this.targetOf(tmpl) || 'journal:today' });
+    } catch (e) {}
+    return out;
+  }
+  async openTriggersPanel() {
+    try {
+      const rows = await this.describeTriggers();
+      const ov = document.createElement('div');
+      ov.setAttribute('style', 'position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;');
+      const box = document.createElement('div');
+      box.setAttribute('style', 'background:var(--cards-bg,#1c2127);color:var(--color-text-400,#ddd);border:1px solid var(--cards-border-color,#333);border-radius:10px;max-width:760px;width:90%;max-height:80vh;overflow:auto;padding:18px 20px;font:13px/1.5 var(--font-family,system-ui);');
+      let html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;"><b style="font-size:15px;">Templater Triggers</b><span style="opacity:.6;cursor:pointer;font-size:18px;" data-x>&times;</span></div>';
+      if (!rows.length) html += '<div style="opacity:.6;">No triggers configured. Set a Schedule (e.g. "05:00 daily") or Trigger On (e.g. "record.created:Meetings") on a template.</div>';
+      for (const r of rows) {
+        html += '<div style="border-top:1px solid var(--cards-border-color,#333);padding:8px 0;">'
+          + '<div style="display:flex;justify-content:space-between;gap:10px;"><b>' + this.escape(r.template) + '</b>'
+          + '<button data-run="' + this.escape(r.template) + '" style="background:var(--button-primary-bg-color,#3b82f6);color:#fff;border:0;border-radius:6px;padding:3px 10px;cursor:pointer;">Run now</button></div>'
+          + '<div style="opacity:.8;">' + (r.schedule ? ('⏰ ' + this.escape(r.schedule) + ' &middot; next ' + this.escape(r.nextFire || '?')) : ('⚡ ' + this.escape(r.event || ''))) + '</div>'
+          + '<div style="opacity:.6;font-size:12px;">target: ' + this.escape(r.target) + ' &middot; condition: ' + this.escape(r.condition) + (r.lastFired ? (' &middot; last: ' + this.escape(r.lastFired)) : '') + '</div></div>';
+      }
+      box.innerHTML = html; ov.appendChild(box); document.body.appendChild(ov);
+      const close = () => { try { document.body.removeChild(ov); } catch (e) {} };
+      ov.addEventListener('mousedown', (e) => { if (e.target === ov) close(); });
+      box.querySelector('[data-x]').addEventListener('click', close);
+      box.querySelectorAll('[data-run]').forEach(btn => btn.addEventListener('click', async () => { btn.textContent = '…'; const res = await this.runTriggerByName(btn.getAttribute('data-run')); this.toast('Templater', res && res.fired ? ('Ran "' + btn.getAttribute('data-run') + '"') : ('Failed: ' + (res && res.error || '?'))); btn.textContent = 'Run now'; }));
+    } catch (e) { this.toast('Templater', 'Triggers panel error: ' + (e && e.message || e)); }
   }
 
   // ========================================================================
