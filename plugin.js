@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.27.1 loaded — RENAME FROM PROPERTIES: command "Templater: Rename from properties" titles the open note from its collection template\'s Title Pattern (e.g. "{{Type}} · {{Lead}}" → "1:1 · Lori Boyd"; {{Prop}} reads the record\'s property, relations resolve to the linked name). Auto-rename: a template with Trigger On record.updated:<Coll> + Target "rename" + a Title Pattern re-titles on every edit (loop-safe, idempotent). ——— TRIGGERS ENGINE: templates now run on a SCHEDULE, an EVENT, or a CONDITION. Template props: Schedule ("05:00 daily" / "09:00 weekdays" / "Mon,Wed 07:30" / "every 30m"), Trigger On ("record.created:Meetings", "record.updated:Tasks", "journal.open", "app.open"), Condition (Datacore expr / weekday / day / Prop="x" — gate), Target ("journal:today" | "collection:<Name>"). The schedule engine ticks every 60s and CATCHES UP on app-open if a time passed while closed (per-occurrence Last Fired dedup). e.g. Daily Note → Schedule "05:00 daily" + Target "journal:today" appends the rendered template to today\'s journal. Command "Templater: Triggers" lists + test-fires. Spine: __templater.runTrigger/checkSchedulesNow/listTriggers. Plus legacy auto:<Coll>, <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.28.0 loaded — AUTO-TITLE: type the body, the title builds itself. Per-collection via the template\'s "Auto Title" (Off/On) + "Title Pattern"; strategy inferred from the pattern tokens. {{firstline}} → titles from the first body line on every edit (debounced ~1.2s) — e.g. Notes. Property patterns ({{Type}} · {{Attendees}}) → auto-title on property edits. SET-ONCE-UNTIL-MANUAL: auto fills only while the title is blank/Untitled/auto-owned; the moment you type your own title it\'s locked (never fights you). On-demand: command "Templater: AI title this note" → a 4-6 word AI summary title (needs the /llm proxy on :8787). Manual: "Templater: Rename from properties" still works for any collection. Spine: __templater.aiTitleActive/autoTitleByGuid(guid,collName)/composeTitle. ——— RENAME FROM PROPERTIES + TRIGGERS ENGINE (schedule/event/condition; Daily Note @ 06:00 → journal:today) unchanged. Plus <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -31,6 +31,8 @@ const F_CONDITION = "Condition";   // predicate gate (Datacore expr, or weekday/
 const F_TARGET = "Target";         // for schedule/app.open: "journal:today" | "collection:<Name>". events use the trigger record.
 const F_LASTFIRED = "Last Fired";  // engine-written dedup stamp (datetime, synced; localStorage mirrors it)
 const F_TITLEPATTERN = "Title Pattern"; // per-collection title pattern, e.g. "{{Type}} · {{Lead}}" — Rename from properties
+const F_AUTOTITLE = "Auto Title";       // choice Off/On — auto-title records of this template's collection (set-once-until-manual)
+const AUTOTITLE_DEBOUNCE_MS = 1200;     // per-record debounce for body-strategy auto-title
 const SCHED_TICK_MS = 60000;       // schedule engine tick
 const TRIGGER_TTL_MS = 30000;      // trigger-index cache TTL
 const JOURNAL_COLL_GUID = "16S1WSXAWSHVHJZ72G6J3JRTCP";
@@ -57,6 +59,7 @@ class Plugin extends AppPlugin {
         (window.__templater.eventIds || []).forEach(id => { try { this.events.off(id); } catch (e) {} });
         (window.__templater.disposers || []).forEach(fn => { try { fn(); } catch (e) {} });
         if (window.__templater.schedTimer) { try { clearInterval(window.__templater.schedTimer); } catch (e) {} } // GUARDRAIL #21: clear leaked interval
+        if (window.__templater.autoTitleDebounce) { try { window.__templater.autoTitleDebounce.forEach(h => clearTimeout(h)); } catch (e) {} } // clear leaked debounce timers
       }
     } catch (e) { /* ignore */ }
     const _prev = window.__templater || {};
@@ -75,6 +78,9 @@ class Plugin extends AppPlugin {
       collCache: null,
       autoIndex: null,
       triggerIndex: null,
+      autoTitleIndex: null,                          // {body:{coll→pat}, prop:{coll→pat}} — Auto Title=On templates
+      autoTitleDebounce: new Map(),                  // recGuid → setTimeout handle (body-strategy debounce)
+      bodyMembers: null,                             // recGuid → {name,pat} membership for body collections (fallback)
     };
     this._state = window.__templater;
 
@@ -140,6 +146,11 @@ class Plugin extends AppPlugin {
       const rcmd = this.ui.addCommandPaletteCommand({ label: "Templater: Rename from properties", icon: "ti-heading", onSelected: () => plugin.renameFromActive() });
       if (rcmd && rcmd.remove) this._state.disposers.push(() => { try { rcmd.remove(); } catch (e) {} });
     } catch (e) { console.warn('[Templater] rename cmd add failed:', e); }
+    // AI-title command — title the open note from a 4-6 word AI summary of its body (needs the /llm proxy)
+    try {
+      const acmd = this.ui.addCommandPaletteCommand({ label: "Templater: AI title this note", icon: "ti-wand", onSelected: () => plugin.aiTitleActive() });
+      if (acmd && acmd.remove) this._state.disposers.push(() => { try { acmd.remove(); } catch (e) {} });
+    } catch (e) { console.warn('[Templater] ai-title cmd add failed:', e); }
 
     // Programmatic render seam (verification + cross-plugin use): render a template string with
     // pre-supplied prompt answers, no UI. Returns the rendered {title, properties, body} string.
@@ -166,6 +177,18 @@ class Plugin extends AppPlugin {
     this._state.listTriggers = async () => { try { return await plugin.describeTriggers(); } catch (e) { return { error: String(e && e.message || e) }; } };
     this._state.renameActive = async () => { try { return await plugin.renameFromActive(); } catch (e) { return { error: String(e && e.message || e) }; } };
     this._state.composeTitle = async (guid, pattern) => { try { const r = plugin.data.getRecord(guid); return r ? await plugin.composeTitleFromRecord(r, pattern, null) : null; } catch (e) { return { error: String(e && e.message || e) }; } };
+    this._state.aiTitleActive = async () => { try { return await plugin.aiTitleActive(); } catch (e) { return { error: String(e && e.message || e) }; } };
+    // Auto-title a record by guid (verification seam): pass collName to pick its body/prop pattern from the index.
+    this._state.autoTitleByGuid = async (guid, collName) => {
+      try {
+        const r = plugin.data.getRecord(guid) || await plugin.pollRecord(guid); if (!r) return { error: 'no record' };
+        const idx = await plugin.getAutoTitleIndex();
+        const pat = (collName && (idx.body[collName] || idx.prop[collName])) || null;
+        if (!pat) return { error: 'no Auto-Title pattern for ' + (collName || '(unknown collection)') };
+        await plugin.autoTitle(r, collName, pat);
+        return { name: (r.getName && r.getName()) || null, pattern: pat };
+      } catch (e) { return { error: String(e && e.message || e) }; }
+    };
 
     console.log('[Templater] commands + slash + auto-apply + triggers engine registered.');
   }
@@ -1799,11 +1822,48 @@ class Plugin extends AppPlugin {
     return st.titlePatIndex.map[collName] || null;
   }
 
+  // Joined body text (one getLineItems), markers/tags stripped per line — context for {{firstline}}/{{body}}/AI.
+  async _bodyText(record) {
+    try {
+      const items = await record.getLineItems(false);
+      const out = [];
+      for (const li of (items || [])) {
+        let t = '';
+        for (const s of (li.segments || [])) { if (s && typeof s.text === 'string') t += s.text; }
+        t = t.replace(/^#+\s*/, '').replace(/^[-*+]\s+(?:\[[ xX]\]\s+)?/, '').replace(/^\d+\.\s+/, '').replace(/^>\s+/, '').trim();
+        if (t) out.push(t);
+      }
+      return out.join('\n');
+    } catch (e) { return ''; }
+  }
+
+  // AI title from body text via the local /llm proxy (on-demand only — never the auto engine).
+  async _aiTitle(body) {
+    const b = String(body || '').slice(0, 1500);
+    if (!b) return '';
+    const prompt = 'Write a concise 4-6 word title for this note. Reply with ONLY the title — no quotes, no trailing punctuation.\n\nNote:\n' + b;
+    try {
+      const r = await this._llm(prompt, false);
+      let t = (r && r.text) ? String(r.text).trim() : '';
+      t = t.replace(/^["'`]+|["'`]+$/g, '').replace(/[.]+$/, '').replace(/[\r\n]+/g, ' ').trim();
+      return t.slice(0, 80);
+    } catch (e) { return ''; }
+  }
+
   // Pre-expand {{Bare}} → {{record.Bare}} (skip reserved tokens), render against the record, clean to a title.
+  // Body tokens {{firstline}}/{{body}}/{{summary}} resolve first (one getLineItems), then the prop/date render pass.
   async composeTitleFromRecord(record, pattern, collection) {
     if (!record || !pattern) return null;
+    let pat = String(pattern);
+    if (/\{\{\s*(firstline|body|summary)\s*\}\}/i.test(pat)) {
+      const body = await this._bodyText(record);
+      const safe = (s) => String(s || '').replace(/[{}]/g, '').trim();   // strip braces so inserted text isn't re-parsed as a token
+      if (/\{\{\s*firstline\s*\}\}/i.test(pat)) { const fl = safe((body.split('\n').find(Boolean)) || ''); pat = pat.replace(/\{\{\s*firstline\s*\}\}/gi, fl); }
+      if (/\{\{\s*summary\s*\}\}/i.test(pat)) { const s = safe(await this._aiTitle(body)); pat = pat.replace(/\{\{\s*summary\s*\}\}/gi, s); }
+      if (/\{\{\s*body\s*\}\}/i.test(pat)) { pat = pat.replace(/\{\{\s*body\s*\}\}/gi, safe(body.replace(/\n+/g, ' ')).slice(0, 200)); }
+    }
     const RESERVED = /^(date[:}]|prompt|var\.|ref:|tag:|ai::|include:|cursor|banner:|relate:|task:|record\.|schedule:|datetime:)/i;
-    const pat = String(pattern).replace(/\{\{\s*([^}|]+?)\s*\}\}/g, (m, inner) => RESERVED.test(inner.trim()) ? m : ('{{record.' + inner.trim() + '}}'));
+    pat = pat.replace(/\{\{\s*([^}|]+?)\s*\}\}/g, (m, inner) => RESERVED.test(inner.trim()) ? m : ('{{record.' + inner.trim() + '}}'));
     let rendered = '';
     try { rendered = await this.renderTemplate(pat, { record, collection: collection || null, prompts: {}, vars: {}, empty: 'skip', templateName: 'rename' }); } catch (e) { return null; }
     let title = this.deriveTitle(this.previewText(rendered));
@@ -1826,6 +1886,136 @@ class Plugin extends AppPlugin {
     if (title === cur) { this.toast('Templater', 'Title already up to date.'); return; }
     const ok = await this.trySetRecordTitle(record, title);
     this.toast('Templater', ok ? ('Renamed → ' + title) : 'Could not rename (collection has no Name/Title field).');
+  }
+
+  // ========================================================================
+  // Auto-title engine (v2.28) — type the body, the title builds itself (set-once-until-manual)
+  // ========================================================================
+
+  // Is this template's Auto Title choice "On"?
+  _autoTitleOn(tmpl) {
+    try {
+      const p = tmpl.prop && tmpl.prop(F_AUTOTITLE);
+      if (p) { if (p.choiceLabel) { const cl = p.choiceLabel(); if (cl) return /^on$/i.test(cl); } if (p.text) { const t = p.text(); if (t) return /^on$/i.test(t); } }
+    } catch (e) {}
+    return false;
+  }
+
+  // Templates with Auto Title=On, bucketed by inferred strategy (firstline/body/summary tokens → body, else prop).
+  // { body: {collName→pattern}, prop: {collName→pattern} }. 30s TTL.
+  async getAutoTitleIndex() {
+    const st = this._state;
+    if (st.autoTitleIndex && (Date.now() - st.autoTitleIndex.ts) < TRIGGER_TTL_MS) return st.autoTitleIndex.idx;
+    const idx = { body: {}, prop: {} };
+    try {
+      const cols = await this.getCollectionsCached();
+      const coll = cols.find(c => c && c.getName && c.getName() === TEMPLATES_COLL) || null;
+      if (coll) {
+        for (const r of await coll.getAllRecords()) {
+          if (!this._autoTitleOn(r)) continue;
+          const pat = this.titlePatternOf(r); if (!pat) continue;
+          const tc = this._templatePinnedCollection(r); if (!tc) continue;
+          const bucket = /\{\{\s*(firstline|body|summary)\s*\}\}/i.test(pat) ? idx.body : idx.prop;
+          if (!bucket[tc]) bucket[tc] = pat;
+        }
+      }
+    } catch (e) { console.warn('[Templater] getAutoTitleIndex', e); }
+    st.autoTitleIndex = { ts: Date.now(), idx };
+    return idx;
+  }
+
+  _collByName(name) {
+    return this.getCollectionsCached().then(cols => cols.find(c => c && c.getName && c.getName() === name) || null);
+  }
+
+  // The "leave my title alone" gate: only auto-title while the title is auto-OWNED —
+  // empty / default-ish (Untitled, New …) OR equal to the last value the engine stamped (localStorage).
+  _titleIsAutoOwned(record, guid) {
+    let cur = '';
+    try { cur = (record.getName && record.getName()) || ''; } catch (e) {}
+    cur = cur.trim();
+    if (!cur) return true;
+    if (/^untitled\b/i.test(cur) || /^new\s/i.test(cur)) return true;
+    try { const last = localStorage.getItem('tmpl-autotitle-' + guid); if (last != null && last === cur) return true; } catch (e) {}
+    return false;
+  }
+
+  // Compose + set the title for a record IF it's still auto-owned. Loop-safe via _applying.
+  async autoTitle(record, collName, pattern) {
+    try {
+      if (!record || !pattern) return;
+      const guid = record.guid || (record.getGuid && record.getGuid()); if (!guid) return;
+      if (this._state.applying.has(guid)) return;
+      if (!this._titleIsAutoOwned(record, guid)) return;   // user typed their own title → locked
+      const title = await this.composeTitleFromRecord(record, pattern, await this._collByName(collName));
+      if (!title) return;
+      let cur = ''; try { cur = (record.getName && record.getName()) || ''; } catch (e) {}
+      if (title === cur.trim()) { try { localStorage.setItem('tmpl-autotitle-' + guid, title); } catch (e) {} return; }
+      this._state.applying.add(guid);
+      try {
+        const ok = await this.trySetRecordTitle(record, title);
+        if (ok) { try { localStorage.setItem('tmpl-autotitle-' + guid, title); } catch (e) {} }
+      } finally { setTimeout(() => { try { this._state.applying.delete(guid); } catch (e) {} }, 4000); }
+    } catch (e) { console.warn('[Templater] autoTitle', e); }
+  }
+
+  // Body-strategy hook off lineitem.updated: resolve the edited line's record + collection, debounce per record.
+  async _maybeAutoTitleFromLine(ev) {
+    try {
+      const idx = await this.getAutoTitleIndex();
+      if (!Object.keys(idx.body).length) return;
+      const collGuid = ev && ev.collectionGuid;
+      let li = ev && ev.getLineItem ? ev.getLineItem() : null;
+      if (li && li.then) li = await li;
+      if (!li) return;
+      const rec = li.getRecord ? li.getRecord() : null; if (!rec) return;
+      const guid = rec.guid || (rec.getGuid && rec.getGuid()); if (!guid) return;
+      // Resolve the collection name: prefer the event's collectionGuid; fall back to membership in a body collection.
+      let collName = collGuid ? await this.collectionNameByGuid(collGuid) : null;
+      let pat = collName ? idx.body[collName] : null;
+      if (!pat) { const found = await this._bodyCollForRecord(guid, idx); if (found) { collName = found.name; pat = found.pat; } }
+      if (!pat) return;
+      if (!this._state.autoTitleDebounce) this._state.autoTitleDebounce = new Map();
+      const prev = this._state.autoTitleDebounce.get(guid); if (prev) clearTimeout(prev);
+      const h = setTimeout(() => { try { this._state.autoTitleDebounce.delete(guid); } catch (e) {} this.autoTitle(rec, collName, pat); }, AUTOTITLE_DEBOUNCE_MS);
+      this._state.autoTitleDebounce.set(guid, h);
+    } catch (e) { console.warn('[Templater] _maybeAutoTitleFromLine', e); }
+  }
+
+  // Fallback when the lineitem event carries no usable collectionGuid: find which body-strategy collection owns this record.
+  // Cached guid→{name,pat} per body collection (60s) so we don't scan all records per keystroke.
+  async _bodyCollForRecord(recGuid, idx) {
+    try {
+      const st = this._state;
+      if (!st.bodyMembers || (Date.now() - st.bodyMembers.ts) > COLL_CACHE_TTL_MS) {
+        const map = new Map();
+        const cols = await this.getCollectionsCached();
+        for (const cn of Object.keys(idx.body)) {
+          const col = cols.find(c => c && c.getName && c.getName() === cn); if (!col) continue;
+          try { for (const r of await col.getAllRecords()) { const g = r.guid || (r.getGuid && r.getGuid()); if (g) map.set(g, { name: cn, pat: idx.body[cn] }); } } catch (e) {}
+        }
+        st.bodyMembers = { ts: Date.now(), map };
+      }
+      return st.bodyMembers.map.get(recGuid) || null;
+    } catch (e) { return null; }
+  }
+
+  // AI on-demand command — title the OPEN record from a 4-6 word AI summary of its body. Sets regardless of the owned-guard.
+  async aiTitleActive() {
+    const panel = this.ui.getActivePanel && this.ui.getActivePanel();
+    const record = panel && panel.getActiveRecord && panel.getActiveRecord();
+    if (!record) { this.toast('Templater', 'No active record — open a note first.'); return; }
+    const collection = panel && panel.getActiveCollection && panel.getActiveCollection();
+    this.toast('Templater', 'Generating AI title…');
+    const title = await this.composeTitleFromRecord(record, '{{summary}}', collection);
+    if (!title) { this.toast('Templater', 'No AI title — check the note has body text and the /llm proxy (:8787) is running.'); return; }
+    const guid = record.guid || (record.getGuid && record.getGuid());
+    if (guid) this._state.applying.add(guid);
+    try {
+      const ok = await this.trySetRecordTitle(record, title);
+      if (ok && guid) { try { localStorage.setItem('tmpl-autotitle-' + guid, title); } catch (e) {} }
+      this.toast('Templater', ok ? ('Titled → ' + title) : 'Could not set title (collection has no Name/Title field).');
+    } finally { if (guid) setTimeout(() => { try { this._state.applying.delete(guid); } catch (e) {} }, 4000); }
   }
 
   // Auto-rename path (Target: rename) — used by the Triggers engine on a record.created/updated trigger.
@@ -2164,7 +2354,7 @@ class Plugin extends AppPlugin {
       if (!segs) return;
       const text = segs.map(s => (s && typeof s.text === 'string' ? s.text : '')).join('').trim();
       const m = text.match(SLASH_RE);
-      if (!m) return;
+      if (!m) { this._maybeAutoTitleFromLine(ev); return; }   // not a /tmpl slash → maybe auto-title from the body
 
       const query = (m[1] || '').trim();
       this._state.slashCooldown.set(guid, Date.now());
@@ -2541,6 +2731,8 @@ class Plugin extends AppPlugin {
       if (this._state.applying.has(recGuid)) return;                    // our own write → ignore
       const collName = await this.collectionNameByGuid(collGuid); if (!collName) return;
       if (collName === TEMPLATES_COLL || AUDIT_COLL_CANDIDATES.includes(collName)) return;
+      // Auto Title (property strategy) — fill the title from props while still auto-owned (runs independent of triggers).
+      try { const ati = await this.getAutoTitleIndex(); const apat = ati.prop[collName]; if (apat) { const arec = await this.pollRecord(recGuid); if (arec) await this.autoTitle(arec, collName, apat); } } catch (e) {}
       const idx = await this.getTriggerIndex(); const tmpls = idx.byEvent['record.updated'][collName] || []; if (!tmpls.length) return;
       const last = this._state.autoCooldown.get('upd:' + recGuid) || 0; if (Date.now() - last < AUTO_COOLDOWN_MS) return;
       this._state.autoCooldown.set('upd:' + recGuid, Date.now()); setTimeout(() => { try { this._state.autoCooldown.delete('upd:' + recGuid); } catch (e) {} }, AUTO_COOLDOWN_MS);
