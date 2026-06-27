@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.26.1 loaded — TRIGGERS ENGINE: templates now run on a SCHEDULE, an EVENT, or a CONDITION. Template props: Schedule ("05:00 daily" / "09:00 weekdays" / "Mon,Wed 07:30" / "every 30m"), Trigger On ("record.created:Meetings", "record.updated:Tasks", "journal.open", "app.open"), Condition (Datacore expr / weekday / day / Prop="x" — gate), Target ("journal:today" | "collection:<Name>"). The schedule engine ticks every 60s and CATCHES UP on app-open if a time passed while closed (per-occurrence Last Fired dedup). e.g. Daily Note → Schedule "05:00 daily" + Target "journal:today" appends the rendered template to today\'s journal. Command "Templater: Triggers" lists + test-fires. Spine: __templater.runTrigger/checkSchedulesNow/listTriggers. Plus legacy auto:<Coll>, <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.27.0 loaded — RENAME FROM PROPERTIES: command "Templater: Rename from properties" titles the open note from its collection template\'s Title Pattern (e.g. "{{Type}} · {{Lead}}" → "1:1 · Lori Boyd"; {{Prop}} reads the record\'s property, relations resolve to the linked name). Auto-rename: a template with Trigger On record.updated:<Coll> + Target "rename" + a Title Pattern re-titles on every edit (loop-safe, idempotent). ——— TRIGGERS ENGINE: templates now run on a SCHEDULE, an EVENT, or a CONDITION. Template props: Schedule ("05:00 daily" / "09:00 weekdays" / "Mon,Wed 07:30" / "every 30m"), Trigger On ("record.created:Meetings", "record.updated:Tasks", "journal.open", "app.open"), Condition (Datacore expr / weekday / day / Prop="x" — gate), Target ("journal:today" | "collection:<Name>"). The schedule engine ticks every 60s and CATCHES UP on app-open if a time passed while closed (per-occurrence Last Fired dedup). e.g. Daily Note → Schedule "05:00 daily" + Target "journal:today" appends the rendered template to today\'s journal. Command "Templater: Triggers" lists + test-fires. Spine: __templater.runTrigger/checkSchedulesNow/listTriggers. Plus legacy auto:<Coll>, <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -30,6 +30,7 @@ const F_TRIGGERON = "Trigger On";  // comma list of: record.created:<Coll> | rec
 const F_CONDITION = "Condition";   // predicate gate (Datacore expr, or weekday/day/Prop=val fallback). empty = always.
 const F_TARGET = "Target";         // for schedule/app.open: "journal:today" | "collection:<Name>". events use the trigger record.
 const F_LASTFIRED = "Last Fired";  // engine-written dedup stamp (datetime, synced; localStorage mirrors it)
+const F_TITLEPATTERN = "Title Pattern"; // per-collection title pattern, e.g. "{{Type}} · {{Lead}}" — Rename from properties
 const SCHED_TICK_MS = 60000;       // schedule engine tick
 const TRIGGER_TTL_MS = 30000;      // trigger-index cache TTL
 const JOURNAL_COLL_GUID = "16S1WSXAWSHVHJZ72G6J3JRTCP";
@@ -134,6 +135,11 @@ class Plugin extends AppPlugin {
       const tcmd = this.ui.addCommandPaletteCommand({ label: "Templater: Triggers", icon: "ti-bolt", onSelected: () => plugin.openTriggersPanel() });
       if (tcmd && tcmd.remove) this._state.disposers.push(() => { try { tcmd.remove(); } catch (e) {} });
     } catch (e) { console.warn('[Templater] triggers cmd add failed:', e); }
+    // Rename-from-properties command — title the open note from its collection's Title Pattern
+    try {
+      const rcmd = this.ui.addCommandPaletteCommand({ label: "Templater: Rename from properties", icon: "ti-heading", onSelected: () => plugin.renameFromActive() });
+      if (rcmd && rcmd.remove) this._state.disposers.push(() => { try { rcmd.remove(); } catch (e) {} });
+    } catch (e) { console.warn('[Templater] rename cmd add failed:', e); }
 
     // Programmatic render seam (verification + cross-plugin use): render a template string with
     // pre-supplied prompt answers, no UI. Returns the rendered {title, properties, body} string.
@@ -158,6 +164,8 @@ class Plugin extends AppPlugin {
     this._state.runTrigger = async (name) => { try { return await plugin.runTriggerByName(name); } catch (e) { return { error: String(e && e.message || e) }; } };
     this._state.checkSchedulesNow = async () => { try { return await plugin.checkSchedules('manual'); } catch (e) { return { error: String(e && e.message || e) }; } };
     this._state.listTriggers = async () => { try { return await plugin.describeTriggers(); } catch (e) { return { error: String(e && e.message || e) }; } };
+    this._state.renameActive = async () => { try { return await plugin.renameFromActive(); } catch (e) { return { error: String(e && e.message || e) }; } };
+    this._state.composeTitle = async (guid, pattern) => { try { const r = plugin.data.getRecord(guid); return r ? await plugin.composeTitleFromRecord(r, pattern, null) : null; } catch (e) { return { error: String(e && e.message || e) }; } };
 
     console.log('[Templater] commands + slash + auto-apply + triggers engine registered.');
   }
@@ -621,6 +629,7 @@ class Plugin extends AppPlugin {
         if (p.text) { const t = p.text(); if (t != null && t !== "") return String(t); }
         if (p.number) { const n = p.number(); if (n != null) return String(n); }
         if (p.date) { const d = p.date(); if (d) return this.formatDate(d, null); }
+        const rel = this._relationNames(p); if (rel) return rel; // relation/record prop → linked record name(s)
         return "";
       } catch (e) { return ""; }
     });
@@ -1741,6 +1750,104 @@ class Plugin extends AppPlugin {
     return false;
   }
 
+  // ========================================================================
+  // Rename from properties (v2.27) — title a note from its own property values
+  // ========================================================================
+
+  // Resolve a relation/record property to the linked record name(s). GUARDRAIL 13: read p.values()
+  // (linkedRecords() can read back []), normalise the guid shapes (incl. a JSON-blob-in-array from MCP writes).
+  _relationNames(p) {
+    const guids = [];
+    const push = (v) => {
+      if (v == null) return;
+      if (typeof v === 'string') { const s = v.trim(); if (s.charAt(0) === '[') { try { JSON.parse(s).forEach(push); return; } catch (e) {} } if (/^[A-Z0-9]{20,32}$/.test(s)) guids.push(s); return; }
+      if (Array.isArray(v)) { v.forEach(push); return; }
+      if (typeof v === 'object') { if (v.guid) guids.push(v.guid); else if (v.getGuid) { try { guids.push(v.getGuid()); } catch (e) {} } }
+    };
+    try { const raw = p.values ? p.values() : null; if (Array.isArray(raw)) raw.forEach(push); else push(raw); } catch (e) {}
+    if (!guids.length) {
+      try { const lr = p.linkedRecords ? p.linkedRecords() : null; if (lr && lr.length) return lr.map(r => { try { return r.getName(); } catch (e) { return ''; } }).filter(Boolean).join(', '); } catch (e) {}
+      return '';
+    }
+    const names = [];
+    for (const g of guids) { try { const r = this.data.getRecord(g); if (r && r.getName) { const n = r.getName(); if (n) names.push(n); } } catch (e) {} }
+    return names.join(', ');
+  }
+
+  titlePatternOf(tmpl) { return (this.tField(tmpl, F_TITLEPATTERN) || '').trim(); }
+
+  // The collection a template is pinned to: Variables JSON {"collection":"X"} OR the `collection` choice label.
+  _templatePinnedCollection(tmpl) {
+    try { const raw = this.tField(tmpl, F_VARS) || this.tField(tmpl, 'Variables'); if (raw && raw.trim()) { const v = JSON.parse(raw); if (v && v.collection) return String(v.collection); } } catch (e) {}
+    try { const p = tmpl.prop && tmpl.prop('collection'); if (p) { if (p.choiceLabel) { const cl = p.choiceLabel(); if (cl) return cl; } if (p.text) { const t = p.text(); if (t) return t; } } } catch (e) {}
+    return null;
+  }
+
+  // collName → its template's Title Pattern (first template pinned to that collection with a non-empty pattern). 30s TTL.
+  async findTitlePatternFor(collName) {
+    if (!collName) return null;
+    const st = this._state;
+    if (!st.titlePatIndex || (Date.now() - st.titlePatIndex.ts) > TRIGGER_TTL_MS) {
+      const map = {};
+      try {
+        const cols = await this.getCollectionsCached();
+        const coll = cols.find(c => c && c.getName && c.getName() === TEMPLATES_COLL) || null;
+        if (coll) { for (const r of await coll.getAllRecords()) { const pat = this.titlePatternOf(r); if (!pat) continue; const tc = this._templatePinnedCollection(r); if (tc && !map[tc]) map[tc] = pat; } }
+      } catch (e) {}
+      st.titlePatIndex = { ts: Date.now(), map };
+    }
+    return st.titlePatIndex.map[collName] || null;
+  }
+
+  // Pre-expand {{Bare}} → {{record.Bare}} (skip reserved tokens), render against the record, clean to a title.
+  async composeTitleFromRecord(record, pattern, collection) {
+    if (!record || !pattern) return null;
+    const RESERVED = /^(date[:}]|prompt|var\.|ref:|tag:|ai::|include:|cursor|banner:|relate:|task:|record\.|schedule:|datetime:)/i;
+    const pat = String(pattern).replace(/\{\{\s*([^}|]+?)\s*\}\}/g, (m, inner) => RESERVED.test(inner.trim()) ? m : ('{{record.' + inner.trim() + '}}'));
+    let rendered = '';
+    try { rendered = await this.renderTemplate(pat, { record, collection: collection || null, prompts: {}, vars: {}, empty: 'skip', templateName: 'rename' }); } catch (e) { return null; }
+    let title = this.deriveTitle(this.previewText(rendered));
+    title = title.replace(/\s{2,}/g, ' ').replace(/\s*[·—–\-:|/]+\s*$/, '').replace(/^\s*[·—–\-:|/]+\s*/, '').trim();
+    return (title && title !== 'Untitled') ? title : null;
+  }
+
+  // Manual command — rename the OPEN record from its collection's Title Pattern.
+  async renameFromActive() {
+    const panel = this.ui.getActivePanel && this.ui.getActivePanel();
+    const record = panel && panel.getActiveRecord && panel.getActiveRecord();
+    const collection = panel && panel.getActiveCollection && panel.getActiveCollection();
+    if (!record) { this.toast('Templater', 'No active record — open a note first.'); return; }
+    const collName = (collection && collection.getName && collection.getName()) || null;
+    const pattern = await this.findTitlePatternFor(collName);
+    if (!pattern) { this.toast('Templater', 'No Title Pattern for "' + (collName || 'this collection') + '" — set one on its template (e.g. {{Type}} · {{Lead}}).'); return; }
+    const title = await this.composeTitleFromRecord(record, pattern, collection);
+    if (!title) { this.toast('Templater', 'Pattern produced no value — fill the properties it references.'); return; }
+    const cur = (record.getName && record.getName()) || '';
+    if (title === cur) { this.toast('Templater', 'Title already up to date.'); return; }
+    const ok = await this.trySetRecordTitle(record, title);
+    this.toast('Templater', ok ? ('Renamed → ' + title) : 'Could not rename (collection has no Name/Title field).');
+  }
+
+  // Auto-rename path (Target: rename) — used by the Triggers engine on a record.created/updated trigger.
+  async _fireRename(tmpl, opts) {
+    opts = opts || {};
+    let record = opts.record || null, recGuid = opts.recGuid || null;
+    if (!record && recGuid) { record = this.data.getRecord(recGuid) || await this.pollRecord(recGuid); }
+    if (!record) return false;
+    if (!recGuid) recGuid = record.guid;
+    const pattern = this.titlePatternOf(tmpl); if (!pattern) return false;
+    const title = await this.composeTitleFromRecord(record, pattern, opts.targetCollection || null);
+    if (!title) return false;
+    const cur = (record.getName && record.getName()) || '';
+    if (title === cur) return false; // idempotent — no write, no loop
+    if (recGuid) this._state.applying.add(recGuid);
+    try {
+      const ok = await this.trySetRecordTitle(record, title);
+      if (ok) { this.stampLastFired(tmpl); console.log('[Templater] renamed "' + cur + '" → "' + title + '" (' + (opts.reason || '') + ')'); }
+      return ok;
+    } finally { if (recGuid) setTimeout(() => { try { this._state.applying.delete(recGuid); } catch (e) {} }, 4000); }
+  }
+
   // ----- frontmatter -----
 
   parseFrontmatter(rendered) {
@@ -2340,6 +2447,7 @@ class Plugin extends AppPlugin {
   }
   async resolveTarget(tmpl) {
     let tgt = this.targetOf(tmpl); if (!tgt) tgt = 'journal:today';
+    if (/^rename$/i.test(tgt)) return null; // rename needs an existing record (event/manual only) — schedules skip it
     if (/^journal(:today|:?$)?$|^today$/i.test(tgt) || /^journal:today$/i.test(tgt)) {
       const j = await this.getTodayJournalRecord(); if (!j.record) return null;
       return { record: j.record, recGuid: j.record.guid, targetCollection: j.journal, mode: 'append' };
@@ -2351,7 +2459,9 @@ class Plugin extends AppPlugin {
 
   // --- the shared render+apply (extracted from onRecordCreated) used by every trigger path ---
   async fireTemplate(tmpl, opts) {
-    opts = opts || {}; const mode = opts.mode || 'update';
+    opts = opts || {};
+    if (opts.mode === 'rename' || /^rename$/i.test(this.targetOf(tmpl))) return await this._fireRename(tmpl, opts); // Target: rename → title from properties
+    const mode = opts.mode || 'update';
     let record = opts.record || null, recGuid = opts.recGuid || null, targetCollection = opts.targetCollection || null;
     if (mode === 'create') {
       if (!targetCollection) return false;
