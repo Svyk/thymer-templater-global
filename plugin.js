@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.28.0 loaded — AUTO-TITLE: type the body, the title builds itself. Per-collection via the template\'s "Auto Title" (Off/On) + "Title Pattern"; strategy inferred from the pattern tokens. {{firstline}} → titles from the first body line on every edit (debounced ~1.2s) — e.g. Notes. Property patterns ({{Type}} · {{Attendees}}) → auto-title on property edits. SET-ONCE-UNTIL-MANUAL: auto fills only while the title is blank/Untitled/auto-owned; the moment you type your own title it\'s locked (never fights you). On-demand: command "Templater: AI title this note" → a 4-6 word AI summary title (needs the /llm proxy on :8787). Manual: "Templater: Rename from properties" still works for any collection. Spine: __templater.aiTitleActive/autoTitleByGuid(guid,collName)/composeTitle. ——— RENAME FROM PROPERTIES + TRIGGERS ENGINE (schedule/event/condition; Daily Note @ 06:00 → journal:today) unchanged. Plus <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.29.0 loaded — +SPINE __templater.applyTemplateByName(name,{prompts,mode,collection}) runs the FULL apply pipeline headless (for the Quick Add plugin). AUTO-TITLE: type the body, the title builds itself. Per-collection via the template\'s "Auto Title" (Off/On) + "Title Pattern"; strategy inferred from the pattern tokens. {{firstline}} → titles from the first body line on every edit (debounced ~1.2s) — e.g. Notes. Property patterns ({{Type}} · {{Attendees}}) → auto-title on property edits. SET-ONCE-UNTIL-MANUAL: auto fills only while the title is blank/Untitled/auto-owned; the moment you type your own title it\'s locked (never fights you). On-demand: command "Templater: AI title this note" → a 4-6 word AI summary title (needs the /llm proxy on :8787). Manual: "Templater: Rename from properties" still works for any collection. Spine: __templater.aiTitleActive/autoTitleByGuid(guid,collName)/composeTitle. ——— RENAME FROM PROPERTIES + TRIGGERS ENGINE (schedule/event/condition; Daily Note @ 06:00 → journal:today) unchanged. Plus <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -168,6 +168,43 @@ class Plugin extends AppPlugin {
         if (!tpl) return { error: 'template not found: ' + name };
         const content = plugin.tField(tpl, 'Template Content') || '';
         return await plugin.renderTemplate(String(content), { record: null, collection: null, prompts: prompts || {}, vars: {}, empty: 'skip', templateName: name });
+      } catch (e) { return { error: String(e && e.message || e) }; }
+    };
+    // APPLY a template by name end-to-end (create/append/update + props + segment body + directives) with
+    // pre-supplied prompt values — the full pipeline `onTemplatePicked` runs, minus the UI. Used by the Quick Add
+    // plugin's Template choice. opts: { prompts:{label:value}, mode:'create'|'append'|'update', collection:name|obj }.
+    // Returns { ok, guid } or { error }.
+    this._state.applyTemplateByName = async (name, opts) => {
+      try {
+        opts = opts || {};
+        const records = await plugin.loadTemplatesSorted();
+        if (!records) return { error: '"' + TEMPLATES_COLL + '" collection not found' };
+        const tpl = records.find((r) => plugin.tName(r) === name || (r.getName && r.getName() === name));
+        if (!tpl) return { error: 'template not found: ' + name };
+        let content = plugin.tContent(tpl);
+        if (!content) return { error: 'template has no content' };
+        try { const ext = (plugin.tField(tpl, F_EXTENDS) || '').trim(); if (ext) { const parent = await plugin.findTemplate(ext); if (parent) { const pc = plugin.tContent(parent); if (pc) content = pc + "\n" + content; } } } catch (e) {}
+        try { content = await plugin.resolveIncludes(content, 0, new Set()); } catch (e) {}
+        let vars = { defaults: {}, empty: 'skip' };
+        try { const raw = plugin.tField(tpl, F_VARS) || plugin.tField(tpl, 'Variables'); if (raw && raw.trim()) { const p = JSON.parse(raw); if (p && typeof p === 'object') vars = Object.assign({ defaults: {}, empty: 'skip' }, p); } } catch (e) {}
+        if (!vars.defaults) vars.defaults = {};
+        let collection = null;
+        if (opts.collection) collection = (typeof opts.collection === 'string') ? await plugin.collectionByName(opts.collection) : opts.collection;
+        if (!collection) { try { const pinned = plugin._templatePinnedCollection(tpl); if (pinned) collection = await plugin.collectionByName(pinned); } catch (e) {} }
+        const panel = plugin.ui.getActivePanel && plugin.ui.getActivePanel();
+        const activeRecord = panel && panel.getActiveRecord && panel.getActiveRecord();
+        const activeCollection = panel && panel.getActiveCollection && panel.getActiveCollection();
+        let rendered;
+        try {
+          rendered = await plugin.renderTemplate(content, {
+            record: activeRecord, collection: collection || activeCollection,
+            prompts: opts.prompts || {}, vars: vars.defaults || {}, empty: vars.empty || 'skip', templateName: plugin.tName(tpl),
+          });
+        } catch (e) { return { error: 'render failed: ' + (e && e.message || e) }; }
+        let guid = null;
+        try { guid = await plugin.applyTemplate(tpl, rendered, { collection, mode: opts.mode || null, preview: false }); }
+        catch (e) { return { error: 'apply failed: ' + (e && e.message || e) }; }
+        return { ok: true, guid: guid || null, name: name };
       } catch (e) { return { error: String(e && e.message || e) }; }
     };
 
