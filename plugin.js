@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.29.0 loaded — +SPINE __templater.applyTemplateByName(name,{prompts,mode,collection}) runs the FULL apply pipeline headless (for the Quick Add plugin). AUTO-TITLE: type the body, the title builds itself. Per-collection via the template\'s "Auto Title" (Off/On) + "Title Pattern"; strategy inferred from the pattern tokens. {{firstline}} → titles from the first body line on every edit (debounced ~1.2s) — e.g. Notes. Property patterns ({{Type}} · {{Attendees}}) → auto-title on property edits. SET-ONCE-UNTIL-MANUAL: auto fills only while the title is blank/Untitled/auto-owned; the moment you type your own title it\'s locked (never fights you). On-demand: command "Templater: AI title this note" → a 4-6 word AI summary title (needs the /llm proxy on :8787). Manual: "Templater: Rename from properties" still works for any collection. Spine: __templater.aiTitleActive/autoTitleByGuid(guid,collName)/composeTitle. ——— RENAME FROM PROPERTIES + TRIGGERS ENGINE (schedule/event/condition; Daily Note @ 06:00 → journal:today) unchanged. Plus <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.30.0 loaded — PER-COLLECTION AUTO-APPLY: set a template\'s "Trigger On" = record.created:<Collection> and a NEW record in that collection auto-scaffolds (silent, no prompts; dangling-separator title junk now stripped so interactive templates auto-apply cleanly). Local UI creates fire automatically; remote/MCP creates need a #auto tag. +SPINE __templater.applyTemplateByName(name,{prompts,mode,collection}) runs the FULL apply pipeline headless (for the Quick Add plugin). AUTO-TITLE: type the body, the title builds itself. Per-collection via the template\'s "Auto Title" (Off/On) + "Title Pattern"; strategy inferred from the pattern tokens. {{firstline}} → titles from the first body line on every edit (debounced ~1.2s) — e.g. Notes. Property patterns ({{Type}} · {{Attendees}}) → auto-title on property edits. SET-ONCE-UNTIL-MANUAL: auto fills only while the title is blank/Untitled/auto-owned; the moment you type your own title it\'s locked (never fights you). On-demand: command "Templater: AI title this note" → a 4-6 word AI summary title (needs the /llm proxy on :8787). Manual: "Templater: Rename from properties" still works for any collection. Spine: __templater.aiTitleActive/autoTitleByGuid(guid,collName)/composeTitle. ——— RENAME FROM PROPERTIES + TRIGGERS ENGINE (schedule/event/condition; Daily Note @ 06:00 → journal:today) unchanged. Plus <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -2685,6 +2685,25 @@ class Plugin extends AppPlugin {
   }
 
   // --- the shared render+apply (extracted from onRecordCreated) used by every trigger path ---
+  // Strip dangling separators from auto-rendered (prompt-less) frontmatter values; drop any that go empty.
+  // Mirrors the manual title cleanup (separator set [·—–|-]) so a value like " · " / "Note · " becomes
+  // "" / "Note". A relation marker object is passed through untouched.
+  _cleanAutoFrontmatter(fm) {
+    const out = {};
+    for (const k of Object.keys(fm)) {
+      const v = fm[k];
+      if (v && typeof v === 'object') { out[k] = v; continue; }
+      const s = String(v == null ? '' : v)
+        .replace(/\s{2,}/g, ' ')
+        .replace(/\s*[·—–|-]\s*([·—–|-]\s*)+/g, ' · ')
+        .replace(/[·—–|-]\s*$/, '')
+        .replace(/^\s*[·—–|-]\s*/, '')
+        .trim();
+      if (s) out[k] = s;
+    }
+    return out;
+  }
+
   async fireTemplate(tmpl, opts) {
     opts = opts || {};
     if (opts.mode === 'rename' || /^rename$/i.test(this.targetOf(tmpl))) return await this._fireRename(tmpl, opts); // Target: rename → title from properties
@@ -2706,6 +2725,11 @@ class Plugin extends AppPlugin {
       if (!vars.defaults) vars.defaults = {};
       const rendered = await this.renderTemplate(content, { record, collection: targetCollection, prompts: {}, vars: vars.defaults, empty: vars.empty || 'skip', templateName: this.tName(tmpl) });
       const parsed = this.parseFrontmatter(rendered);
+      // Trigger/schedule renders run with NO prompt answers, so an interactive template's frontmatter
+      // (e.g. `Title: {{prompt:Type}} · {{prompt:Title}}`) collapses to dangling separators (" · ").
+      // Clean each value the way the manual title path does and DROP any that reduce to empty — so an
+      // auto-applied template lays down a clean SCAFFOLD instead of clobbering the title with junk.
+      if (parsed.frontmatter) parsed.frontmatter = this._cleanAutoFrontmatter(parsed.frontmatter);
       const wantPromote = /<!--PLEXUS-PROMOTE-->/i.test(parsed.body || '');
       const body = (parsed.body || '').replace(/<!--PLEXUS-PROMOTE-->/gi, '');
       if (mode !== 'append' && parsed.frontmatter && Object.keys(parsed.frontmatter).length) { try { await this.applyFrontmatter(record, parsed.frontmatter); } catch (e) {} }
