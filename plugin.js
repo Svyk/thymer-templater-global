@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.30.0 loaded — PER-COLLECTION AUTO-APPLY: set a template\'s "Trigger On" = record.created:<Collection> and a NEW record in that collection auto-scaffolds (silent, no prompts; dangling-separator title junk now stripped so interactive templates auto-apply cleanly). Local UI creates fire automatically; remote/MCP creates need a #auto tag. +SPINE __templater.applyTemplateByName(name,{prompts,mode,collection}) runs the FULL apply pipeline headless (for the Quick Add plugin). AUTO-TITLE: type the body, the title builds itself. Per-collection via the template\'s "Auto Title" (Off/On) + "Title Pattern"; strategy inferred from the pattern tokens. {{firstline}} → titles from the first body line on every edit (debounced ~1.2s) — e.g. Notes. Property patterns ({{Type}} · {{Attendees}}) → auto-title on property edits. SET-ONCE-UNTIL-MANUAL: auto fills only while the title is blank/Untitled/auto-owned; the moment you type your own title it\'s locked (never fights you). On-demand: command "Templater: AI title this note" → a 4-6 word AI summary title (needs the /llm proxy on :8787). Manual: "Templater: Rename from properties" still works for any collection. Spine: __templater.aiTitleActive/autoTitleByGuid(guid,collName)/composeTitle. ——— RENAME FROM PROPERTIES + TRIGGERS ENGINE (schedule/event/condition; Daily Note @ 06:00 → journal:today) unchanged. Plus <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.31.0 loaded — HEADING NESTING: a heading now PARENTS the lines beneath it (so "- Key point" under "## Notes" is a real child); opt out per template with Variables JSON {"nest":"flat"}. NATIVE-EDITOR AUTHORING: write a template\'s BODY as normal nested bullets/headings in the template record itself (WYSIWYG, drag-to-indent) and Templater reads it — frontmatter stays in the short Template Content --- block; used only when that text body is empty, so existing markdown templates are unchanged. PER-COLLECTION AUTO-APPLY: set a template\'s "Trigger On" = record.created:<Collection> and a NEW record in that collection auto-scaffolds (silent, no prompts; dangling-separator title junk now stripped so interactive templates auto-apply cleanly). Local UI creates fire automatically; remote/MCP creates need a #auto tag. +SPINE __templater.applyTemplateByName(name,{prompts,mode,collection}) runs the FULL apply pipeline headless (for the Quick Add plugin). AUTO-TITLE: type the body, the title builds itself. Per-collection via the template\'s "Auto Title" (Off/On) + "Title Pattern"; strategy inferred from the pattern tokens. {{firstline}} → titles from the first body line on every edit (debounced ~1.2s) — e.g. Notes. Property patterns ({{Type}} · {{Attendees}}) → auto-title on property edits. SET-ONCE-UNTIL-MANUAL: auto fills only while the title is blank/Untitled/auto-owned; the moment you type your own title it\'s locked (never fights you). On-demand: command "Templater: AI title this note" → a 4-6 word AI summary title (needs the /llm proxy on :8787). Manual: "Templater: Rename from properties" still works for any collection. Spine: __templater.aiTitleActive/autoTitleByGuid(guid,collName)/composeTitle. ——— RENAME FROM PROPERTIES + TRIGGERS ENGINE (schedule/event/condition; Daily Note @ 06:00 → journal:today) unchanged. Plus <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -166,8 +166,8 @@ class Plugin extends AppPlugin {
         const records = await plugin.loadTemplatesSorted();
         const tpl = (records || []).find((r) => plugin.tName(r) === name || (r.getName && r.getName() === name));
         if (!tpl) return { error: 'template not found: ' + name };
-        const content = plugin.tField(tpl, 'Template Content') || '';
-        return await plugin.renderTemplate(String(content), { record: null, collection: null, prompts: prompts || {}, vars: {}, empty: 'skip', templateName: name });
+        const content = await plugin.assembleTemplateSource(tpl);
+        return await plugin.renderTemplate(String(content || ''), { record: null, collection: null, prompts: prompts || {}, vars: {}, empty: 'skip', templateName: name });
       } catch (e) { return { error: String(e && e.message || e) }; }
     };
     // APPLY a template by name end-to-end (create/append/update + props + segment body + directives) with
@@ -181,9 +181,9 @@ class Plugin extends AppPlugin {
         if (!records) return { error: '"' + TEMPLATES_COLL + '" collection not found' };
         const tpl = records.find((r) => plugin.tName(r) === name || (r.getName && r.getName() === name));
         if (!tpl) return { error: 'template not found: ' + name };
-        let content = plugin.tContent(tpl);
+        let content = await plugin.assembleTemplateSource(tpl);
         if (!content) return { error: 'template has no content' };
-        try { const ext = (plugin.tField(tpl, F_EXTENDS) || '').trim(); if (ext) { const parent = await plugin.findTemplate(ext); if (parent) { const pc = plugin.tContent(parent); if (pc) content = pc + "\n" + content; } } } catch (e) {}
+        try { const ext = (plugin.tField(tpl, F_EXTENDS) || '').trim(); if (ext) { const parent = await plugin.findTemplate(ext); if (parent) { const pc = await plugin.assembleTemplateSource(parent); if (pc) content = pc + "\n" + content; } } } catch (e) {}
         try { content = await plugin.resolveIncludes(content, 0, new Set()); } catch (e) {}
         let vars = { defaults: {}, empty: 'skip' };
         try { const raw = plugin.tField(tpl, F_VARS) || plugin.tField(tpl, 'Variables'); if (raw && raw.trim()) { const p = JSON.parse(raw); if (p && typeof p === 'object') vars = Object.assign({ defaults: {}, empty: 'skip' }, p); } } catch (e) {}
@@ -275,6 +275,85 @@ class Plugin extends AppPlugin {
       if (all.length) return all.join("\n");
     } catch (e) {}
     return "";
+  }
+
+  // The template SOURCE = frontmatter from the `Template Content` text prop + body from EITHER the text prop
+  // OR (native-editor authoring) the template record's own nested line items. Frontmatter always stays in the
+  // text prop (a short --- block, easy to edit); the body is taken from the record's body line items ONLY when
+  // the text-prop body is empty — so existing markdown-text templates are untouched, and a template you author
+  // in the normal outliner (drag-to-indent, WYSIWYG) is read back faithfully (Phase-1 heading nesting + the
+  // depth-indented serialization round-trip the tree). Returns a markdown string for the normal render pipeline.
+  async assembleTemplateSource(tmpl) {
+    const text = this.tContent(tmpl) || '';
+    let fmBlock = '', textBody = text;
+    const m = text.match(/^(---\s*\r?\n[\s\S]*?\r?\n---)\s*\r?\n?([\s\S]*)$/);
+    if (m) { fmBlock = m[1]; textBody = m[2]; }
+    let body = textBody;
+    if (!textBody.trim()) {
+      try { const sb = await this.serializeBody(tmpl); if (sb && sb.trim()) body = sb; } catch (e) {}
+    }
+    return fmBlock ? (fmBlock + '\n' + body) : body;
+  }
+
+  // Serialize a template record's body line items -> a markdown string (indentation = tree depth * 2 spaces),
+  // so the existing renderTemplate -> parseFrontmatter -> writeBody pipeline reconstructs the same tree.
+  async serializeBody(tmpl) {
+    let items = [];
+    try { items = await tmpl.getLineItems(false); } catch (e) { return ''; }
+    if (!items || !items.length) return '';
+    const recGuid = tmpl.guid || (tmpl.getGuid && tmpl.getGuid());
+    const guidSet = new Set(items.map(it => it && it.guid).filter(Boolean));
+    const byParent = new Map();
+    for (const it of items) {
+      if (!it) continue;
+      const p = it.parent_guid;
+      const pk = (p == null || p === recGuid || !guidSet.has(p)) ? '__root__' : p;
+      if (!byParent.has(pk)) byParent.set(pk, []);
+      byParent.get(pk).push(it);
+    }
+    const out = [];
+    const emit = (it, depth) => {
+      const md = this._lineItemToMarkdown(it, depth);
+      if (md != null) out.push(md);
+      for (const k of (byParent.get(it.guid) || [])) emit(k, depth + 1);
+    };
+    for (const root of (byParent.get('__root__') || [])) emit(root, 0);
+    return out.join('\n');
+  }
+
+  _lineItemToMarkdown(it, depth) {
+    if (!it) return null;
+    const indent = '  '.repeat(Math.max(0, depth));
+    const text = this._segmentsToText(it.segments || []);
+    switch (it.type) {
+      case 'heading': {
+        const size = (it.props && (it.props.heading_size != null ? it.props.heading_size : it.props.hsize)) || 2;
+        return indent + '#'.repeat(Math.min(Math.max(size, 1), 6)) + ' ' + text;
+      }
+      case 'task': {
+        let done = false; try { done = it.getTaskStatus && it.getTaskStatus() === 'done'; } catch (e) {}
+        return indent + '- [' + (done ? 'x' : ' ') + '] ' + text;
+      }
+      case 'ulist': return indent + '- ' + text;
+      case 'olist': return indent + '1. ' + text;
+      case 'quote': return indent + '> ' + text;
+      case 'text': case 'empty': case 'br': return indent + text;
+      default: return null; // image/file/ref/table/etc — can't round-trip as template markdown
+    }
+  }
+
+  _segmentsToText(segs) {
+    let out = '';
+    for (const s of (segs || [])) {
+      if (!s) continue;
+      if (typeof s.text === 'string') { out += s.text; continue; }
+      const t = s.type;
+      if (t === 'hashtag') { const tag = (s.text && (s.text.tag || s.text.title)) || ''; if (tag) out += '#' + String(tag).replace(/^#/, ''); }
+      else if (t === 'ref') { const title = (s.text && s.text.title) || ''; if (title) out += '{{ref:' + title + '}}'; }
+      else if (t === 'datetime') { out += (s.text && s.text.formatted) || ''; }
+      else if (s.text && typeof s.text === 'object' && s.text.title) { out += s.text.title; }
+    }
+    return out;
   }
 
   tField(tmpl, label) {
@@ -385,7 +464,7 @@ class Plugin extends AppPlugin {
   }
 
   async onTemplatePicked(template) {
-    let content = this.tContent(template);
+    let content = await this.assembleTemplateSource(template);
     if (!content) { this.toast("Templater", "Template has no content."); return; }
 
     // Inheritance: Extends -> prepend parent content (one level).
@@ -394,7 +473,7 @@ class Plugin extends AppPlugin {
       if (extendsRef) {
         const parent = await this.findTemplate(extendsRef);
         if (parent) {
-          const parentContent = this.tContent(parent);
+          const parentContent = await this.assembleTemplateSource(parent);
           if (parentContent) content = parentContent + "\n" + content;
           console.log('[Templater] inheritance: prepended parent "' + this.tName(parent) + '"');
         } else {
@@ -1411,7 +1490,7 @@ class Plugin extends AppPlugin {
       const wantPromote = /<!--PLEXUS-PROMOTE-->/i.test(parsedSF.body || '');
       try {
         const body = (parsedSF.body || '').replace(/<!--TMPL-TASK:[^>]*?-->/g, '').replace(/<!--PLEXUS-[^>]*?-->/g, '');
-        if (body.trim()) await this.writeBody(rec, body);
+        if (body.trim()) await this.writeBody(rec, body, { flat: vars && vars.nest === 'flat' });
       } catch (e) { console.warn('[Templater] schema-form body write failed', e); }
       if (wantPromote) this._promoteAfterApply(rec);
       try { const p = template.prop && template.prop(F_LASTUSED); if (p && p.setFromDate) p.setFromDate(new Date()); } catch (_) {}
@@ -1648,7 +1727,7 @@ class Plugin extends AppPlugin {
     bodyForWrite = bodyForWrite.replace(/<!--PLEXUS-PROMOTE-->/gi, '');
     let cursorGuid = null;
     if (bodyForWrite.trim()) {
-      cursorGuid = await this.writeBody(targetRecord, bodyForWrite); // TP-3: {{cursor}} target line
+      cursorGuid = await this.writeBody(targetRecord, bodyForWrite, { flat: vars && vars.nest === 'flat' }); // TP-3: {{cursor}} target line
     }
     if (wantPromote) this._promoteAfterApply(targetRecord);
 
@@ -2200,7 +2279,8 @@ class Plugin extends AppPlugin {
 
   // ----- body writer (segment-aware, nested) -----
 
-  async writeBody(record, body) {
+  async writeBody(record, body, opts) {
+    const flat = !!(opts && opts.flat);
     const lines = body.split('\n');
     // Track parents per indent LEVEL so nested bullets nest correctly. Indent is normalized
     // to a level (2 spaces or 1 tab = one level) before the stack comparison, so 2-space and
@@ -2208,7 +2288,8 @@ class Plugin extends AppPlugin {
     // PREPENDS at the parent's start, so each new sibling lands ABOVE the previous one and the
     // whole body renders REVERSED. To append in author order, pass the previous sibling under
     // the same parent as afterItem. lastChildOf maps a parent (or ROOT) -> its last inserted child.
-    const stack = []; // [{level, item}]
+    const stack = []; // [{level, item}] — bullet/list indentation WITHIN the current heading scope
+    const headingStack = []; // [{size, item}] — heading outline scopes; a heading PARENTS the lines beneath it
     const ROOT = {};
     const lastChildOf = new Map();
     let cursorGuid = null; // TP-3: the line carrying {{cursor}} (navigated-to after apply)
@@ -2258,12 +2339,25 @@ class Plugin extends AppPlugin {
 
       const nestable = (type === 'ulist' || type === 'olist' || type === 'task');
       let parentItem = null;
-      if (nestable) {
-        while (stack.length && stack[stack.length - 1].level >= level) stack.pop();
-        parentItem = stack.length ? stack[stack.length - 1].item : null;
+      if (flat) {
+        // legacy: bullets nest under bullets by indent; headings/text/quote reset to root ({"nest":"flat"})
+        if (nestable) {
+          while (stack.length && stack[stack.length - 1].level >= level) stack.pop();
+          parentItem = stack.length ? stack[stack.length - 1].item : null;
+        } else { stack.length = 0; }
+      } else if (type === 'heading') {
+        // a heading opens an outline scope: it nests under any SHALLOWER heading, else the root.
+        const size = props.heading_size;
+        while (headingStack.length && headingStack[headingStack.length - 1].size >= size) headingStack.pop();
+        parentItem = headingStack.length ? headingStack[headingStack.length - 1].item : null;
+        stack.length = 0; // new heading scope resets bullet nesting
       } else {
-        // headings / text / quote reset list nesting
-        stack.length = 0;
+        // non-heading lines parent under the current heading scope (or root when no heading yet).
+        const scopeParent = headingStack.length ? headingStack[headingStack.length - 1].item : null;
+        if (nestable) {
+          while (stack.length && stack[stack.length - 1].level >= level) stack.pop();
+          parentItem = stack.length ? stack[stack.length - 1].item : scopeParent;
+        } else { stack.length = 0; parentItem = scopeParent; }
       }
 
       let segments = this.parseInlineSegments(content);
@@ -2280,7 +2374,8 @@ class Plugin extends AppPlugin {
       }
       if (created) {
         lastChildOf.set(parentKey, created);
-        if (nestable) stack.push({ level, item: created });
+        if (type === 'heading' && !flat) headingStack.push({ size: props.heading_size, item: created });
+        else if (nestable) stack.push({ level, item: created });
         if (wantCursor && created.guid) cursorGuid = created.guid; // TP-3
       }
     }
@@ -2717,8 +2812,8 @@ class Plugin extends AppPlugin {
     if (!record) return false; if (!recGuid) recGuid = record.guid;
     if (recGuid) this._state.applying.add(recGuid); // guard: our own writes must not re-trigger record.updated/lineitem
     try {
-      let content = this.tContent(tmpl); if (!content) return false;
-      try { const ext = (this.tField(tmpl, F_EXTENDS) || '').trim(); if (ext) { const p = await this.findTemplate(ext); if (p) { const pc = this.tContent(p); if (pc) content = pc + "\n" + content; } } } catch (e) {}
+      let content = await this.assembleTemplateSource(tmpl); if (!content) return false;
+      try { const ext = (this.tField(tmpl, F_EXTENDS) || '').trim(); if (ext) { const p = await this.findTemplate(ext); if (p) { const pc = await this.assembleTemplateSource(p); if (pc) content = pc + "\n" + content; } } } catch (e) {}
       try { content = await this.resolveIncludes(content, 0, new Set()); } catch (e) {}
       let vars = { defaults: {} };
       try { const raw = this.tField(tmpl, F_VARS) || this.tField(tmpl, 'Variables'); if (raw && raw.trim()) { const parsed = JSON.parse(raw); if (parsed && typeof parsed === 'object') vars = Object.assign({ defaults: {} }, parsed); } } catch (e) {}
@@ -2733,7 +2828,7 @@ class Plugin extends AppPlugin {
       const wantPromote = /<!--PLEXUS-PROMOTE-->/i.test(parsed.body || '');
       const body = (parsed.body || '').replace(/<!--PLEXUS-PROMOTE-->/gi, '');
       if (mode !== 'append' && parsed.frontmatter && Object.keys(parsed.frontmatter).length) { try { await this.applyFrontmatter(record, parsed.frontmatter); } catch (e) {} }
-      if (body.trim()) { try { await this.writeBody(record, body); } catch (e) {} }
+      if (body.trim()) { try { await this.writeBody(record, body, { flat: vars && vars.nest === 'flat' }); } catch (e) {} }
       if (wantPromote) this._promoteAfterApply(record);
       try { const p = tmpl.prop && tmpl.prop(F_LASTUSED); if (p && p.setFromDate) p.setFromDate(new Date()); } catch (e) {}
       this.stampLastFired(tmpl);
