@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.31.0 loaded — HEADING NESTING: a heading now PARENTS the lines beneath it (so "- Key point" under "## Notes" is a real child); opt out per template with Variables JSON {"nest":"flat"}. NATIVE-EDITOR AUTHORING: write a template\'s BODY as normal nested bullets/headings in the template record itself (WYSIWYG, drag-to-indent) and Templater reads it — frontmatter stays in the short Template Content --- block; used only when that text body is empty, so existing markdown templates are unchanged. PER-COLLECTION AUTO-APPLY: set a template\'s "Trigger On" = record.created:<Collection> and a NEW record in that collection auto-scaffolds (silent, no prompts; dangling-separator title junk now stripped so interactive templates auto-apply cleanly). Local UI creates fire automatically; remote/MCP creates need a #auto tag. +SPINE __templater.applyTemplateByName(name,{prompts,mode,collection}) runs the FULL apply pipeline headless (for the Quick Add plugin). AUTO-TITLE: type the body, the title builds itself. Per-collection via the template\'s "Auto Title" (Off/On) + "Title Pattern"; strategy inferred from the pattern tokens. {{firstline}} → titles from the first body line on every edit (debounced ~1.2s) — e.g. Notes. Property patterns ({{Type}} · {{Attendees}}) → auto-title on property edits. SET-ONCE-UNTIL-MANUAL: auto fills only while the title is blank/Untitled/auto-owned; the moment you type your own title it\'s locked (never fights you). On-demand: command "Templater: AI title this note" → a 4-6 word AI summary title (needs the /llm proxy on :8787). Manual: "Templater: Rename from properties" still works for any collection. Spine: __templater.aiTitleActive/autoTitleByGuid(guid,collName)/composeTitle. ——— RENAME FROM PROPERTIES + TRIGGERS ENGINE (schedule/event/condition; Daily Note @ 06:00 → journal:today) unchanged. Plus <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.32.0 loaded — TEMPLATE EDITOR: command "Templater: Edit template…" opens a FORM (pick a property from the target collection schema + how it fills: Prompt/Choice/Date/Record/Static; Auto-apply toggle; Auto Title; Title Pattern) and writes the --- frontmatter + settings back to the record — no more hand-editing the cramped text field; the BODY stays edited natively. HEADING NESTING: a heading now PARENTS the lines beneath it (so "- Key point" under "## Notes" is a real child); opt out per template with Variables JSON {"nest":"flat"}. NATIVE-EDITOR AUTHORING: write a template\'s BODY as normal nested bullets/headings in the template record itself (WYSIWYG, drag-to-indent) and Templater reads it — frontmatter stays in the short Template Content --- block; used only when that text body is empty, so existing markdown templates are unchanged. PER-COLLECTION AUTO-APPLY: set a template\'s "Trigger On" = record.created:<Collection> and a NEW record in that collection auto-scaffolds (silent, no prompts; dangling-separator title junk now stripped so interactive templates auto-apply cleanly). Local UI creates fire automatically; remote/MCP creates need a #auto tag. +SPINE __templater.applyTemplateByName(name,{prompts,mode,collection}) runs the FULL apply pipeline headless (for the Quick Add plugin). AUTO-TITLE: type the body, the title builds itself. Per-collection via the template\'s "Auto Title" (Off/On) + "Title Pattern"; strategy inferred from the pattern tokens. {{firstline}} → titles from the first body line on every edit (debounced ~1.2s) — e.g. Notes. Property patterns ({{Type}} · {{Attendees}}) → auto-title on property edits. SET-ONCE-UNTIL-MANUAL: auto fills only while the title is blank/Untitled/auto-owned; the moment you type your own title it\'s locked (never fights you). On-demand: command "Templater: AI title this note" → a 4-6 word AI summary title (needs the /llm proxy on :8787). Manual: "Templater: Rename from properties" still works for any collection. Spine: __templater.aiTitleActive/autoTitleByGuid(guid,collName)/composeTitle. ——— RENAME FROM PROPERTIES + TRIGGERS ENGINE (schedule/event/condition; Daily Note @ 06:00 → journal:today) unchanged. Plus <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -151,6 +151,11 @@ class Plugin extends AppPlugin {
       const acmd = this.ui.addCommandPaletteCommand({ label: "Templater: AI title this note", icon: "ti-wand", onSelected: () => plugin.aiTitleActive() });
       if (acmd && acmd.remove) this._state.disposers.push(() => { try { acmd.remove(); } catch (e) {} });
     } catch (e) { console.warn('[Templater] ai-title cmd add failed:', e); }
+    // Template Editor — edit a template's frontmatter + settings via a FORM (no hand-editing the cramped text prop)
+    try {
+      const ecmd = this.ui.addCommandPaletteCommand({ label: "Templater: Edit template…", icon: "ti-edit", onSelected: () => plugin.editTemplateCommand() });
+      if (ecmd && ecmd.remove) this._state.disposers.push(() => { try { ecmd.remove(); } catch (e) {} });
+    } catch (e) { console.warn('[Templater] edit-template cmd add failed:', e); }
 
     // Programmatic render seam (verification + cross-plugin use): render a template string with
     // pre-supplied prompt answers, no UI. Returns the rendered {title, properties, body} string.
@@ -1498,6 +1503,172 @@ class Plugin extends AppPlugin {
       this.toast('Applied: ' + this.tName(template), 'Created "' + title + '" in ' + (collection.getName ? collection.getName() : ''));
       try { const np = this.ui.getActivePanel && this.ui.getActivePanel(); if (np && np.navigateTo) await np.navigateTo({ itemGuid: guid, highlight: true }); } catch (_) {}
     });
+  }
+
+  // ========================================================================
+  // Template Editor (v2.32) — edit a template's frontmatter + settings via a FORM, so the cramped
+  // Template Content text property never has to be hand-edited. The BODY stays edited natively in
+  // the outliner; this dialog only rewrites the leading `---` frontmatter block + the settings props.
+  // ========================================================================
+
+  async editTemplateCommand() {
+    let tmpl = null;
+    try {
+      const panel = this.ui.getActivePanel && this.ui.getActivePanel();
+      const ar = panel && panel.getActiveRecord && panel.getActiveRecord();
+      const ac = panel && panel.getActiveCollection && panel.getActiveCollection();
+      if (ar && ac && ac.getName && ac.getName() === TEMPLATES_COLL) tmpl = ar;
+    } catch (e) {}
+    if (tmpl) return this.openTemplateEditor(tmpl);
+    const records = await this.loadTemplatesSorted();
+    if (!records || !records.length) { this.toast('Templater', 'No templates found.'); return; }
+    const names = records.map(r => this.tName(r));
+    const idx = await this.asyncSuggester('Edit which template?', names);
+    if (idx == null || idx < 0) return;
+    if (records[idx]) this.openTemplateEditor(records[idx]);
+  }
+
+  // split a Template Content string into the leading ---…--- block (raw) + the body remainder.
+  _splitFrontmatter(text) {
+    text = String(text || '');
+    const m = text.match(/^(---\s*\r?\n[\s\S]*?\r?\n---)\s*\r?\n?([\s\S]*)$/);
+    if (m) return { fmBlock: m[1], body: m[2] };
+    return { fmBlock: '', body: text };
+  }
+  // raw Key: value rows out of a frontmatter block (values kept verbatim — NOT marker-processed).
+  _parseFmRaw(fmBlock) {
+    const out = [];
+    for (const ln of String(fmBlock || '').split('\n')) {
+      if (/^---\s*$/.test(ln) || !ln.trim()) continue;
+      const m = ln.match(/^\s*([^:]+?)\s*:\s*([\s\S]*)$/);
+      if (m) out.push({ key: m[1].trim(), value: m[2] });
+    }
+    return out;
+  }
+  // a raw frontmatter value -> {mode, value}. A single recognized token gets a friendly mode; anything
+  // else (composite "{{a}} · {{b}}", literals) becomes 'static' (verbatim) so editing is always lossless.
+  _parseFmValue(raw) {
+    const v = String(raw == null ? '' : raw).trim();
+    let m;
+    if ((m = v.match(/^\{\{prompt\.choice:\s*([\s\S]+?)\s*\}\}$/))) return { mode: 'choice', value: m[1].trim() };
+    if ((m = v.match(/^\{\{prompt\.records:\s*([\s\S]+?)\s*\}\}$/))) return { mode: 'records', value: m[1].trim() };
+    if ((m = v.match(/^\{\{prompt\.record:\s*([\s\S]+?)\s*\}\}$/))) return { mode: 'record', value: m[1].trim() };
+    if ((m = v.match(/^\{\{prompt:\s*([\s\S]+?)\s*\}\}$/))) return { mode: 'prompt', value: m[1].trim() };
+    if ((m = v.match(/^\{\{date(?::\s*([\s\S]*?))?\s*\}\}$/))) return { mode: 'date', value: (m[1] || '').trim() };
+    return { mode: 'static', value: v };
+  }
+  _serializeFmRow(key, mode, value) {
+    const v = String(value == null ? '' : value).trim();
+    switch (mode) {
+      case 'prompt':  return key + ': {{prompt:' + v + '}}';
+      case 'choice':  return key + ': {{prompt.choice:' + v + '}}';
+      case 'record':  return key + ': {{prompt.record:' + v + '}}';
+      case 'records': return key + ': {{prompt.records:' + v + '}}';
+      case 'date':    return key + ': ' + (v ? ('{{date:' + v + '}}') : '{{date}}');
+      default:        return key + ': ' + (value == null ? '' : String(value));
+    }
+  }
+  // a sensible default row when the user adds a schema field: choice→its options, record→target coll, etc.
+  _defaultRowForField(f) {
+    if (!f) return { key: '', mode: 'prompt', value: '' };
+    if (f.type === 'choice' && f.choices && f.choices.length) return { key: f.label, mode: 'choice', value: f.label + ' :: ' + f.choices.join(', ') };
+    if (f.type === 'record') return { key: f.label, mode: f.many ? 'records' : 'record', value: f.label + ' :: ' + (f.targetCollection || '') };
+    if (f.type === 'datetime') return { key: f.label, mode: 'date', value: '' };
+    return { key: f.label, mode: 'prompt', value: f.label };
+  }
+
+  async openTemplateEditor(template) {
+    const MODES = [['prompt', 'Prompt'], ['choice', 'Choice'], ['date', 'Date'], ['record', 'Record (one)'], ['records', 'Records (many)'], ['static', 'Static text']];
+    const PLACEHOLD = { prompt: 'prompt label (e.g. Title  or  Source ?? )', choice: 'Label :: opt1, opt2, opt3', record: 'Label :: TargetCollection', records: 'Label :: TargetCollection', date: 'format e.g. YYYY-MM-DD (blank = today)', static: 'literal value' };
+    // current state
+    const content = this.tContent(template) || '';
+    const split = this._splitFrontmatter(content);
+    const startRows = this._parseFmRaw(split.fmBlock).map(r => { const pv = this._parseFmValue(r.value); return { key: r.key, mode: pv.mode, value: pv.value }; });
+    let targetColl = this._templatePinnedCollection(template) || '';
+    if (targetColl === TEMPLATES_COLL) targetColl = '';
+    const titlePattern = this.titlePatternOf(template);
+    let autoTitle = 'Off'; try { const p = template.prop(F_AUTOTITLE); const cl = p && p.choiceLabel && p.choiceLabel(); if (cl) autoTitle = cl; } catch (e) {}
+    const triggerOn = this.tField(template, F_TRIGGERON) || '';
+    const autoApply = /record\.created\s*:/i.test(triggerOn);
+    let allColls = []; try { allColls = (await this.data.getAllCollections()).map(c => { try { return c.getName(); } catch (e) { return null; } }).filter(Boolean).sort((a, b) => a.localeCompare(b)); } catch (e) {}
+    let schemaFields = []; try { const c = targetColl && await this.collectionByName(targetColl); if (c) schemaFields = await this._collectionFields(c); } catch (e) {}
+
+    const overlay = document.createElement('div'); overlay.className = 'tmpl-overlay';
+    const modal = document.createElement('div'); modal.className = 'tmpl-modal';
+    modal.innerHTML = '<h2>Edit template: ' + this.escape(this.tName(template)) + '</h2><div class="tmpl-sub">Properties set on a new record + settings. Edit the BODY in the normal editor — it\'s this template\'s own outline.</div>';
+    // target collection
+    const tcWrap = document.createElement('div'); tcWrap.className = 'tmpl-field';
+    const tcLbl = document.createElement('label'); tcLbl.textContent = 'Fills a new record in'; tcWrap.appendChild(tcLbl);
+    const tcSel = document.createElement('select');
+    if (!allColls.includes(targetColl) && targetColl) allColls = [targetColl].concat(allColls);
+    allColls.forEach(n => { const o = document.createElement('option'); o.value = n; o.textContent = n; if (n === targetColl) o.selected = true; tcSel.appendChild(o); });
+    tcWrap.appendChild(tcSel); modal.appendChild(tcWrap);
+    // properties section
+    const propsLbl = document.createElement('label'); propsLbl.className = 'tmpl-field'; propsLbl.textContent = 'Properties set on create'; propsLbl.style.fontWeight = '600'; modal.appendChild(propsLbl);
+    const rowsHost = document.createElement('div'); modal.appendChild(rowsHost);
+    const rowCtls = [];
+    const propOptions = () => { const set = []; const seen = new Set(); const push = (n) => { if (n && !seen.has(n)) { seen.add(n); set.push(n); } }; push('Title'); schemaFields.forEach(f => push(f.label)); rowCtls.forEach(rc => push(rc.propSel.value)); startRows.forEach(r => push(r.key)); return set; };
+    const fillPropSel = (sel, current) => { sel.innerHTML = ''; const opts = propOptions(); if (current && !opts.includes(current)) opts.unshift(current); opts.forEach(n => { const o = document.createElement('option'); o.value = n; o.textContent = n; if (n === current) o.selected = true; sel.appendChild(o); }); };
+    const addRow = (row) => {
+      row = row || { key: '', mode: 'prompt', value: '' };
+      const r = document.createElement('div'); r.style.display = 'flex'; r.style.gap = '6px'; r.style.marginBottom = '6px'; r.style.alignItems = 'center';
+      const propSel = document.createElement('select'); propSel.style.flex = '0 0 28%';
+      const modeSel = document.createElement('select'); modeSel.style.flex = '0 0 22%'; MODES.forEach(([v, l]) => { const o = document.createElement('option'); o.value = v; o.textContent = l; if (v === row.mode) o.selected = true; modeSel.appendChild(o); });
+      const valIn = document.createElement('input'); valIn.type = 'text'; valIn.style.flex = '1 1 auto'; valIn.value = row.value || ''; valIn.placeholder = PLACEHOLD[row.mode] || ''; this.attachInputGuards(valIn);
+      modeSel.onchange = () => { valIn.placeholder = PLACEHOLD[modeSel.value] || ''; };
+      const del = document.createElement('button'); del.className = 'tmpl-btn'; del.textContent = '×'; del.title = 'Remove'; del.style.flex = '0 0 auto';
+      del.onclick = () => { const i = rowCtls.findIndex(x => x.propSel === propSel); if (i >= 0) rowCtls.splice(i, 1); try { rowsHost.removeChild(r); } catch (e) {} };
+      r.appendChild(propSel); r.appendChild(modeSel); r.appendChild(valIn); r.appendChild(del);
+      rowsHost.appendChild(r); rowCtls.push({ propSel, modeSel, valIn });
+      fillPropSel(propSel, row.key);
+    };
+    startRows.forEach(addRow);
+    const addBtn = document.createElement('button'); addBtn.className = 'tmpl-btn'; addBtn.textContent = '+ add property'; addBtn.style.marginBottom = '10px';
+    addBtn.onclick = () => { const used = new Set(rowCtls.map(rc => rc.propSel.value)); const f = schemaFields.find(x => !used.has(x.label)); addRow(this._defaultRowForField(f)); };
+    modal.appendChild(addBtn);
+    // re-fetch schema + rebuild prop dropdowns when the target collection changes
+    tcSel.onchange = async () => { try { const c = await this.collectionByName(tcSel.value); schemaFields = c ? await this._collectionFields(c) : []; } catch (e) { schemaFields = []; } rowCtls.forEach(rc => fillPropSel(rc.propSel, rc.propSel.value)); };
+    // settings
+    const mkText = (labelText, val) => { const w = document.createElement('div'); w.className = 'tmpl-field'; const l = document.createElement('label'); l.textContent = labelText; w.appendChild(l); const i = document.createElement('input'); i.type = 'text'; i.value = val || ''; this.attachInputGuards(i); w.appendChild(i); modal.appendChild(w); return i; };
+    const autoWrap = document.createElement('div'); autoWrap.className = 'tmpl-field';
+    const autoChk = document.createElement('input'); autoChk.type = 'checkbox'; autoChk.checked = autoApply; autoChk.id = 'tmpl-autoapply';
+    const autoLbl = document.createElement('label'); autoLbl.setAttribute('for', 'tmpl-autoapply'); autoLbl.textContent = ' Auto-apply to new records in this collection'; autoLbl.style.display = 'inline'; autoLbl.style.fontWeight = '400';
+    autoWrap.appendChild(autoChk); autoWrap.appendChild(autoLbl); modal.appendChild(autoWrap);
+    const atWrap = document.createElement('div'); atWrap.className = 'tmpl-field'; const atL = document.createElement('label'); atL.textContent = 'Auto Title'; atWrap.appendChild(atL);
+    const atSel = document.createElement('select'); ['Off', 'On'].forEach(o => { const op = document.createElement('option'); op.value = o; op.textContent = o; if (o === autoTitle) op.selected = true; atSel.appendChild(op); }); atWrap.appendChild(atSel); modal.appendChild(atWrap);
+    const tpIn = mkText('Title Pattern (optional, e.g. {{firstline}} or {{Type}} · {{Lead}})', titlePattern);
+    // actions
+    const actions = document.createElement('div'); actions.className = 'tmpl-actions';
+    const cancel = document.createElement('button'); cancel.className = 'tmpl-btn'; cancel.textContent = 'Cancel';
+    const save = document.createElement('button'); save.className = 'tmpl-btn primary'; save.textContent = 'Save';
+    actions.appendChild(cancel); actions.appendChild(save); modal.appendChild(actions);
+    overlay.appendChild(modal); document.body.appendChild(overlay);
+    let done = false; const close = () => { try { document.body.removeChild(overlay); } catch (e) {} };
+    cancel.onclick = () => { if (done) return; done = true; close(); };
+    overlay.onclick = (e) => { if (e.target === overlay) { if (done) return; done = true; close(); } };
+    modal.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); save.click(); } if (e.key === 'Escape') { e.preventDefault(); cancel.click(); } });
+    save.onclick = () => {
+      if (done) return; done = true;
+      try {
+        const tcoll = tcSel.value || targetColl;
+        // rebuild frontmatter block from the rows
+        const fmLines = ['---'];
+        for (const rc of rowCtls) { const key = (rc.propSel.value || '').trim(); if (!key) continue; fmLines.push(this._serializeFmRow(key, rc.modeSel.value, rc.valIn.value)); }
+        fmLines.push('---');
+        const fmBlock = fmLines.length > 2 ? fmLines.join('\n') : '';
+        const body = split.body || '';
+        const newContent = fmBlock ? (body.trim() ? (fmBlock + '\n' + body) : fmBlock) : body;
+        try { const p = template.prop(F_CONTENT); if (p && p.set) p.set(newContent); } catch (e) { console.warn('[Templater] editor: content set', e); }
+        // settings
+        try { const p = template.prop(F_TITLEPATTERN); if (p && p.set) p.set((tpIn.value || '').trim()); } catch (e) {}
+        try { const p = template.prop(F_AUTOTITLE); if (p && p.setChoice) p.setChoice(atSel.value); } catch (e) {}
+        try { const p = template.prop(F_TRIGGERON); if (p && p.set) p.set(autoChk.checked && tcoll ? ('record.created:' + tcoll) : ''); } catch (e) {}
+        // target collection -> Variables JSON (preserve other keys)
+        try { let vo = {}; const raw = this.tField(template, F_VARS); if (raw && raw.trim()) { try { vo = JSON.parse(raw) || {}; } catch (e) { vo = {}; } } if (tcoll) vo.collection = tcoll; const vp = template.prop(F_VARS); if (vp && vp.set) vp.set(JSON.stringify(vo)); } catch (e) {}
+        close();
+        this.toast('Templater', 'Saved "' + this.tName(template) + '"');
+      } catch (e) { console.warn('[Templater] editor save failed', e); this.toast('Templater', 'Save failed — see console.'); }
+    };
   }
 
   // TP-20: best-effort call to the local generative endpoint (task-search proxy /llm on :8787).
