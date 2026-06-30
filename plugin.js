@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.36.0 loaded — editor: "Fills a new record in" now offers "— none (ask on apply) —" (unpinned template — apply-time picker chooses the collection; auto-apply disabled when none); "Templater: New template…" command (+ "＋ New template…" in the edit picker) creates a template via this dialog; fixed the auto-apply checkbox layout (was detached from its label) + clearer wording. FULL-CONTROL EDITOR: "Templater: Edit template…" now edits the BODY too (markdown textarea + Native-outline/Text storage toggle — Native is editable here AND in the doc), the raw Variables (JSON), plus property rows/Auto-apply/Auto Title/Title Pattern. AUTOCOMPLETE (Datacore-style) in every value field + body: type {{ for the token menu (with hints), {{record. for fields, dc: @ for collections. In-dialog Template-language reference + a fully rewritten README documenting every token. Earlier: the FORM editor writes the --- frontmatter + settings back to the record — no hand-editing the cramped text field. HEADING NESTING: a heading now PARENTS the lines beneath it (so "- Key point" under "## Notes" is a real child); opt out per template with Variables JSON {"nest":"flat"}. NATIVE-EDITOR AUTHORING: write a template\'s BODY as normal nested bullets/headings in the template record itself (WYSIWYG, drag-to-indent) and Templater reads it — frontmatter stays in the short Template Content --- block; used only when that text body is empty, so existing markdown templates are unchanged. PER-COLLECTION AUTO-APPLY: set a template\'s "Trigger On" = record.created:<Collection> and a NEW record in that collection auto-scaffolds (silent, no prompts; dangling-separator title junk now stripped so interactive templates auto-apply cleanly). Local UI creates fire automatically; remote/MCP creates need a #auto tag. +SPINE __templater.applyTemplateByName(name,{prompts,mode,collection}) runs the FULL apply pipeline headless (for the Quick Add plugin). AUTO-TITLE: type the body, the title builds itself. Per-collection via the template\'s "Auto Title" (Off/On) + "Title Pattern"; strategy inferred from the pattern tokens. {{firstline}} → titles from the first body line on every edit (debounced ~1.2s) — e.g. Notes. Property patterns ({{Type}} · {{Attendees}}) → auto-title on property edits. SET-ONCE-UNTIL-MANUAL: auto fills only while the title is blank/Untitled/auto-owned; the moment you type your own title it\'s locked (never fights you). On-demand: command "Templater: AI title this note" → a 4-6 word AI summary title (needs the /llm proxy on :8787). Manual: "Templater: Rename from properties" still works for any collection. Spine: __templater.aiTitleActive/autoTitleByGuid(guid,collName)/composeTitle. ——— RENAME FROM PROPERTIES + TRIGGERS ENGINE (schedule/event/condition; Daily Note @ 06:00 → journal:today) unchanged. Plus <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.37.0 loaded — editor: "Fills a new record in" now offers "— none (ask on apply) —" (unpinned template — apply-time picker chooses the collection; auto-apply disabled when none); "Templater: New template…" command (+ "＋ New template…" in the edit picker) creates a template via this dialog; fixed the auto-apply checkbox layout (was detached from its label) + clearer wording. FULL-CONTROL EDITOR: "Templater: Edit template…" now edits the BODY too (markdown textarea + Native-outline/Text storage toggle — Native is editable here AND in the doc), the raw Variables (JSON), plus property rows/Auto-apply/Auto Title/Title Pattern. AUTOCOMPLETE (Datacore-style) in every value field + body: type {{ for the token menu (with hints), {{record. for fields, dc: @ for collections. In-dialog Template-language reference + a fully rewritten README documenting every token. Earlier: the FORM editor writes the --- frontmatter + settings back to the record — no hand-editing the cramped text field. HEADING NESTING: a heading now PARENTS the lines beneath it (so "- Key point" under "## Notes" is a real child); opt out per template with Variables JSON {"nest":"flat"}. NATIVE-EDITOR AUTHORING: write a template\'s BODY as normal nested bullets/headings in the template record itself (WYSIWYG, drag-to-indent) and Templater reads it — frontmatter stays in the short Template Content --- block; used only when that text body is empty, so existing markdown templates are unchanged. PER-COLLECTION AUTO-APPLY: set a template\'s "Trigger On" = record.created:<Collection> and a NEW record in that collection auto-scaffolds (silent, no prompts; dangling-separator title junk now stripped so interactive templates auto-apply cleanly). Local UI creates fire automatically; remote/MCP creates need a #auto tag. +SPINE __templater.applyTemplateByName(name,{prompts,mode,collection}) runs the FULL apply pipeline headless (for the Quick Add plugin). AUTO-TITLE: type the body, the title builds itself. Per-collection via the template\'s "Auto Title" (Off/On) + "Title Pattern"; strategy inferred from the pattern tokens. {{firstline}} → titles from the first body line on every edit (debounced ~1.2s) — e.g. Notes. Property patterns ({{Type}} · {{Attendees}}) → auto-title on property edits. SET-ONCE-UNTIL-MANUAL: auto fills only while the title is blank/Untitled/auto-owned; the moment you type your own title it\'s locked (never fights you). On-demand: command "Templater: AI title this note" → a 4-6 word AI summary title (needs the /llm proxy on :8787). Manual: "Templater: Rename from properties" still works for any collection. Spine: __templater.aiTitleActive/autoTitleByGuid(guid,collName)/composeTitle. ——— RENAME FROM PROPERTIES + TRIGGERS ENGINE (schedule/event/condition; Daily Note @ 06:00 → journal:today) unchanged. Plus <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -366,7 +366,7 @@ class Plugin extends AppPlugin {
       if (typeof s.text === 'string') { out += s.text; continue; }
       const t = s.type;
       if (t === 'hashtag') { const tag = (s.text && (s.text.tag || s.text.title)) || ''; if (tag) out += '#' + String(tag).replace(/^#/, ''); }
-      else if (t === 'ref') { const title = (s.text && s.text.title) || ''; if (title) out += '{{ref:' + title + '}}'; }
+      else if (t === 'ref') { const g = s.text && s.text.guid; const title = (s.text && s.text.title) || ''; if (g) out += '{{ref:' + g + '}}'; else if (title) out += '{{ref:' + title + '}}'; } // P2-10: prefer the guid so the exact link round-trips (resolveRefGuid accepts a guid)
       else if (t === 'datetime') { out += (s.text && s.text.formatted) || ''; }
       else if (s.text && typeof s.text === 'object' && s.text.title) { out += s.text.title; }
     }
@@ -2015,6 +2015,11 @@ class Plugin extends AppPlugin {
 
   async applyTemplate(template, rendered, opts) {
     const triggers = this.tTriggers(template);
+    // P0: `vars` (the template's Variables JSON) is read later as {flat: vars.nest==='flat'} but was never
+    // declared in this scope → ReferenceError aborted EVERY interactive apply of a body template (picker /
+    // applyTemplateByName spine / preview). Declare it here, mirroring fireTemplate.
+    let vars = {};
+    try { const raw = this.tField(template, F_VARS) || this.tField(template, 'Variables'); if (raw && raw.trim()) { const parsed = JSON.parse(raw); if (parsed && typeof parsed === 'object') vars = parsed; } } catch (e) {}
     const panel = this.ui.getActivePanel && this.ui.getActivePanel();
     const activeRecord = panel && panel.getActiveRecord && panel.getActiveRecord();
     const activeCollection = panel && panel.getActiveCollection && panel.getActiveCollection();
@@ -2421,6 +2426,7 @@ class Plugin extends AppPlugin {
       }
     } catch (e) { console.warn('[Templater] getAutoTitleIndex', e); }
     st.autoTitleIndex = { ts: Date.now(), idx };
+    st.hasBodyAutoTitle = Object.keys(idx.body).length > 0; // P1-2: cheap gate for the per-keystroke path
     return idx;
   }
 
@@ -2462,23 +2468,31 @@ class Plugin extends AppPlugin {
   // Body-strategy hook off lineitem.updated: resolve the edited line's record + collection, debounce per record.
   async _maybeAutoTitleFromLine(ev) {
     try {
-      const idx = await this.getAutoTitleIndex();
-      if (!Object.keys(idx.body).length) return;
-      const collGuid = ev && ev.collectionGuid;
-      let li = ev && ev.getLineItem ? ev.getLineItem() : null;
-      if (li && li.then) li = await li;
-      if (!li) return;
-      const rec = li.getRecord ? li.getRecord() : null; if (!rec) return;
-      const guid = rec.guid || (rec.getGuid && rec.getGuid()); if (!guid) return;
-      // Resolve the collection name: prefer the event's collectionGuid; fall back to membership in a body collection.
-      let collName = collGuid ? await this.collectionNameByGuid(collGuid) : null;
-      let pat = collName ? idx.body[collName] : null;
-      if (!pat) { const found = await this._bodyCollForRecord(guid, idx); if (found) { collName = found.name; pat = found.pat; } }
-      if (!pat) return;
+      // P1-2: cheap synchronous gate — skip the async index + getLineItem/getRecord/collection resolution that
+      // used to run on EVERY keystroke. hasBodyAutoTitle is recomputed when the index (re)builds; null=unknown
+      // (evaluate once), false=no body-auto-title templates exist (bail instantly).
+      if (this._state.hasBodyAutoTitle === false) return;
+      if (this._state.hasBodyAutoTitle == null) { const idx0 = await this.getAutoTitleIndex(); this._state.hasBodyAutoTitle = Object.keys(idx0.body).length > 0; if (!this._state.hasBodyAutoTitle) return; }
+      const lineGuid = ev && ev.lineItemGuid; if (!lineGuid) return;
       if (!this._state.autoTitleDebounce) this._state.autoTitleDebounce = new Map();
-      const prev = this._state.autoTitleDebounce.get(guid); if (prev) clearTimeout(prev);
-      const h = setTimeout(() => { try { this._state.autoTitleDebounce.delete(guid); } catch (e) {} this.autoTitle(rec, collName, pat); }, AUTOTITLE_DEBOUNCE_MS);
-      this._state.autoTitleDebounce.set(guid, h);
+      const dk = 'body:' + lineGuid;
+      const prev = this._state.autoTitleDebounce.get(dk); if (prev) clearTimeout(prev);
+      // Defer ALL resolution into the debounced callback — nothing heavy runs per keystroke.
+      const h = setTimeout(async () => {
+        try {
+          this._state.autoTitleDebounce.delete(dk);
+          const idx = await this.getAutoTitleIndex(); if (!Object.keys(idx.body).length) return;
+          let li = ev && ev.getLineItem ? ev.getLineItem() : null; if (li && li.then) li = await li; if (!li) return;
+          const rec = li.getRecord ? li.getRecord() : null; if (!rec) return;
+          const guid = rec.guid || (rec.getGuid && rec.getGuid()); if (!guid) return;
+          let collName = ev.collectionGuid ? await this.collectionNameByGuid(ev.collectionGuid) : null;
+          let pat = collName ? idx.body[collName] : null;
+          if (!pat) { const found = await this._bodyCollForRecord(guid, idx); if (found) { collName = found.name; pat = found.pat; } }
+          if (!pat) return;
+          await this.autoTitle(rec, collName, pat);
+        } catch (e) {}
+      }, AUTOTITLE_DEBOUNCE_MS);
+      this._state.autoTitleDebounce.set(dk, h);
     } catch (e) { console.warn('[Templater] _maybeAutoTitleFromLine', e); }
   }
 
@@ -2868,6 +2882,10 @@ class Plugin extends AppPlugin {
 
       const segs = ev.getSegments ? ev.getSegments() : null;
       if (!segs) return;
+      // P1-2: cheap pre-check — a /tmpl slash command always begins with '/'. Skip the join+regex for ordinary
+      // lines (the common case) and go straight to the now-cheap auto-title path.
+      const first = (segs.length && segs[0] && typeof segs[0].text === 'string') ? segs[0].text.replace(/^\s+/, '') : '';
+      if (first.charAt(0) !== '/') { this._maybeAutoTitleFromLine(ev); return; }
       const text = segs.map(s => (s && typeof s.text === 'string' ? s.text : '')).join('').trim();
       const m = text.match(SLASH_RE);
       if (!m) { this._maybeAutoTitleFromLine(ev); return; }   // not a /tmpl slash → maybe auto-title from the body
@@ -2906,6 +2924,13 @@ class Plugin extends AppPlugin {
     try { const items = await r.getLineItems(); for (const li of (items || [])) for (const s of (li.segments || [])) { if (s && s.type === 'hashtag' && /^#(auto|templater\/auto)$/i.test(String(s.text || ''))) return true; } } catch (e) {}
     return false;
   }
+  // P1-3: a template edit must clear the derived index caches (they have their own 30s TTL, so edits to
+  // Trigger On / Title Pattern / Auto Title were ignored for up to 30s even though _recSnap was invalidated).
+  _invalidateTemplateIndexes() {
+    const st = this._state; if (!st) return;
+    st.triggerIndex = null; st.autoTitleIndex = null; st.titlePatIndex = null; st.autoIndex = null; st.bodyMembers = null;
+    st.hasBodyAutoTitle = null; // re-evaluate on next keystroke (a template may have gained/lost body auto-title)
+  }
   async onRecordCreated(ev) {
     try {
       if (!ev) return;
@@ -2920,7 +2945,7 @@ class Plugin extends AppPlugin {
 
       const collName = await this.collectionNameByGuid(collGuid);
       if (!collName) return;
-      if (collName === TEMPLATES_COLL || AUDIT_COLL_CANDIDATES.includes(collName)) return;
+      if (collName === TEMPLATES_COLL || AUDIT_COLL_CANDIDATES.includes(collName)) { if (collName === TEMPLATES_COLL) this._invalidateTemplateIndexes(); return; }
 
       // Unified index: legacy auto:<Coll> (Triggers) + new Trigger On: record.created:<Coll>.
       const idx = await this.getTriggerIndex();
@@ -3272,9 +3297,18 @@ class Plugin extends AppPlugin {
       if (!ev) return; const recGuid = ev.recordGuid, collGuid = ev.collectionGuid; if (!recGuid || !collGuid) return;
       if (this._state.applying.has(recGuid)) return;                    // our own write → ignore
       const collName = await this.collectionNameByGuid(collGuid); if (!collName) return;
-      if (collName === TEMPLATES_COLL || AUDIT_COLL_CANDIDATES.includes(collName)) return;
-      // Auto Title (property strategy) — fill the title from props while still auto-owned (runs independent of triggers).
-      try { const ati = await this.getAutoTitleIndex(); const apat = ati.prop[collName]; if (apat) { const arec = await this.pollRecord(recGuid); if (arec) await this.autoTitle(arec, collName, apat); } } catch (e) {}
+      if (collName === TEMPLATES_COLL || AUDIT_COLL_CANDIDATES.includes(collName)) { if (collName === TEMPLATES_COLL) this._invalidateTemplateIndexes(); return; }
+      // Auto Title (property strategy) — fill from props while still auto-owned. P2-9: debounce per record so a
+      // burst of property edits collapses to one compose+set (was running on every record.updated).
+      try {
+        const ati = await this.getAutoTitleIndex(); const apat = ati.prop[collName];
+        if (apat) {
+          const dmap = this._state.autoTitleDebounce; const dk = 'prop:' + recGuid;
+          if (dmap && dmap.has(dk)) clearTimeout(dmap.get(dk));
+          const run = async () => { try { if (dmap) dmap.delete(dk); const arec = await this.pollRecord(recGuid); if (arec) await this.autoTitle(arec, collName, apat); } catch (e) {} };
+          if (dmap && typeof dmap.set === 'function') dmap.set(dk, setTimeout(run, 800)); else await run();
+        }
+      } catch (e) {}
       const idx = await this.getTriggerIndex(); const tmpls = idx.byEvent['record.updated'][collName] || []; if (!tmpls.length) return;
       const last = this._state.autoCooldown.get('upd:' + recGuid) || 0; if (Date.now() - last < AUTO_COOLDOWN_MS) return;
       this._state.autoCooldown.set('upd:' + recGuid, Date.now()); setTimeout(() => { try { this._state.autoCooldown.delete('upd:' + recGuid); } catch (e) {} }, AUTO_COOLDOWN_MS);
