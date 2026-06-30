@@ -1,76 +1,162 @@
-# Templater (Global) v2.0.0
+# Templater (Global) for Thymer
 
-A Thymer **global AppPlugin** that turns saved template records into fully-formed Thymer records — title, typed properties, and native body line items — in one keystroke. Pick a template, fill any prompts, and Templater renders the tokens and applies the result to a new or existing record, then writes an audit row.
+A Thymer **global AppPlugin** that turns saved template records into fully-formed Thymer records — title, typed properties, and native nested body — in one keystroke. Pick a template, answer any prompts, and Templater renders the tokens and applies the result to a new or existing record. Templates can also **auto-apply** when you create a record, run on a **schedule**, and be edited through a **form dialog** with autocomplete.
 
-This is the v2 successor to the v1 `Recurring Templates` CollectionPlugin. The architecture changed (AppPlugin + a `Templates` collection as the data store); the proven v1 algorithms (picker, prompts modal, preview, render, apply, segment parsing, audit, toast) were ported as-is.
+Templates live in the **Templates** collection — one record per template. The body can be authored as the template record's own nested outline (WYSIWYG) or as a markdown block in the `Template Content` text property; the short `---` frontmatter (which sets the new record's properties) lives in `Template Content`.
 
-## What's different from v1
+## Entry points
 
-- **Global** — invokable from any panel/collection, not bound to one collection.
-- **Sets properties + title, not just body.** A template can populate a new record's typed properties (text / choice / datetime) and its title via a frontmatter block — this is a core feature, not optional.
-- **Two entry points** — Cmd+K command palette and an inline `/tmpl` slash command.
-- **Triggers** — control where a template lands (new record, append, update, or auto-apply on record creation).
+- **Cmd+K → "Apply Template…"** — pick a template, answer prompts, confirm. Creates/updates the target record and navigates to it.
+- **Inline `/tmpl`** — in any line, type `/tmpl` to open the picker or `/tmpl <name>` to jump to one; applied in place per its Triggers.
+- **Cmd+K → "Templater: Edit template…"** — the form editor (below). Edits the active Templates record, else prompts you to pick one.
+- **Auto-apply** — make a new record in a collection that has a template with `Trigger On: record.created:<Collection>` and the body/props are scaffolded automatically (silent, no prompts).
+- **Schedule** — a template with a `Schedule` (e.g. `06:00 daily`) + `Target` (e.g. `journal:today`) fires on its own.
 
-## How to use
+## The Template Editor (form)
 
-### 1. Cmd+K → "Apply Template..."
+`Templater: Edit template…` opens a dialog so you never hand-edit the cramped text field:
 
-Open the command palette (**Cmd+K** / Ctrl+K), run **Apply Template...**, choose a template from the dropdown (sorted by most-recently-used), answer any `{{prompt:...}}` modals, and confirm in the preview. Templater creates/updates the target record and navigates to it.
+- **Fills a new record in** — the target collection.
+- **Properties set on create** — one row per frontmatter property: pick a property from the target collection's schema, choose how it fills (**Prompt / Choice / Date / Record (one) / Records (many) / Static**), set the value. `+ add property` to add more. Composite/odd values load as **Static** (verbatim, lossless).
+- **Body** — a markdown textarea (full control) with a **storage toggle**: *Native outline* (the body is the template record's own line items — editable here **and** in the normal doc) or *Text* (stored in `Template Content`). The body is only rebuilt when you change it.
+- **Auto-apply** checkbox → sets `Trigger On: record.created:<collection>`.
+- **Auto Title** (Off/On) + **Title Pattern**.
+- **Advanced — Variables (JSON)** — edit the raw Variables JSON (validated on save).
+- **Template language reference** — the full token list, in-dialog.
 
-### 2. Inline `/tmpl`
+**Autocomplete** (in every value field + the body): type `{{` for the token menu (with hints), `{{record.` for the target collection's fields, `dc: @` for collections, and `:: ` inside a record token for collections. ↑/↓ to move, Enter/Tab to accept, Esc to dismiss.
 
-In any line item, type `/tmpl` to open the picker, or `/tmpl <name>` to jump straight to a named template. The slash line is cleared and the template is applied in place per its Triggers.
+## Template language
 
-## Token / template language
+Tokens are written in `Template Content` (the `---` frontmatter and the body) or in the body line items. Tokens with a native Thymer representation emit **segments** (datetime, ref, hashtag), not plain text.
 
-Tokens are written in the template's `Template Content`. Tokens with a native Thymer representation emit **segments** (datetime, ref, hashtag), not plain text.
+### Prompts (ask at apply time)
 
 | Token | Resolves to |
 |---|---|
-| `{{prompt:LABEL}}` | Modal text input; value substituted |
-| `{{prompt:LABEL ?? default}}` | Modal input with a default |
-| `{{date}}` | Today — text, or a `datetime` segment on its own line |
-| `{{date:FMT}}` | Formatted date; `FMT` uses `YYYY MM DD HH mm ss` |
-| `{{date:tomorrow}}` / `{{date:next monday}}` / `{{date:+3 days}}` / `{{date:-1 week}}` | Natural-language date via `DateTime.parseDateTimeString` |
-| `{{record.PropName}}` | A property of the currently-active record |
-| `{{var.NAME}}` | A default from the template's `Variables (JSON)` |
+| `{{prompt:LABEL}}` | Text input; value substituted |
+| `{{prompt:LABEL ?? default}}` | Text input with a default (`?? ` with nothing = optional/empty) |
+| `{{prompt.choice:LABEL :: A, B, C}}` | Pick one of the listed options |
+| `{{prompt.record:LABEL :: Collection}}` | Pick one record from `Collection` → a `ref` segment / relation |
+| `{{prompt.records:LABEL :: Collection}}` | Pick multiple records (multi-relation) |
+
+The same `LABEL` is asked once even if reused (e.g. a Title composed of `{{prompt.choice:Type …}} · {{prompt:Title}}`).
+
+### Dates
+
+| Token | Resolves to |
+|---|---|
+| `{{date}}` | Today — a `datetime` segment on its own body line, or text in frontmatter |
+| `{{date:FMT}}` | Formatted; `FMT` uses `YYYY MM DD HH mm ss dddd MMMM` etc. |
+| `{{date:tomorrow}}` / `{{date:next monday}}` / `{{date:+3 days}}` / `{{date:-1 week}}` | Natural language (via `DateTime.parseDateTimeString`) |
+| `{{date:+7}}` / `{{date:+7@Start Date}}` | Relative-offset / milestone (offset from another date field) |
+| `{{schedule:…}}` / `{{datetime:…}}` | Aliases of `{{date:…}}` — a real scheduling segment |
+
+### References, tags, record & vars
+
+| Token | Resolves to |
+|---|---|
 | `{{ref:Name or GUID}}` | Inline **ref** segment to that record |
 | `{{tag:foo}}` or inline `#foo` | **hashtag** segment |
-| `{{include:Template Name}}` | Inlines another template's content (recursion limit 3) |
-| `<%* js %>` | Sandboxed JS block (forbidden-identifier blocklist enforced) |
+| `{{record.PropName}}` | A property value of the active/target record |
+| `{{var.NAME}}` | A default from the template's `Variables (JSON)` → `defaults` |
 
-Sandboxed JS exposes a `tp.*` namespace (`tp.date.*`, `tp.system.prompt/suggester/clipboard`, `tp.thymer.query/ref/setProperty/create_record`, `tp.file.title`, `tp.config`). Blocked identifiers (`eval`, `Function`, `window`, `fetch(`, `require(`, etc.) output `[js blocked: forbidden identifier]`; runtime errors output `[js error: ...]`.
+### Directives (do something after apply)
+
+| Token | Effect |
+|---|---|
+| `{{cursor}}` | Put the cursor on this line after apply (and highlight it) |
+| `{{banner:https://…}}` | Fetch the image and set it as the new record's banner |
+| `{{relate:Field=Name}}` | Set a typed **relation** property `Field` → the resolved record |
+| `{{task: Title \| status=To Do \| priority=High \| context=Computer \| due=+3 days}}` | Spawn a linked **Rich Task** record (not a body line) |
+| `{{include:Template Name}}` | Inline another template's content (recursion limit 3) |
+| `<!--PLEXUS-PROMOTE-->` | After apply, promote the body's native `- [ ]` tasks → linked Rich Tasks |
+| `{{ai:: instruction}}` | Inline text generated by the local `/llm` proxy (best-effort; empty if down) |
+
+### JavaScript blocks `<%* … %>`
+
+Sandboxed async JS with a `tp.*` namespace (a forbidden-identifier blocklist gates `eval`/`Function`/`window`/`fetch(`/`require(`…):
+
+- `tp.date.now/today/tomorrow/yesterday/weekday/parse(fmt)`
+- `tp.system.prompt(label, default)` · `suggester(items, labels)` · `clipboard()`
+- `tp.thymer.query(collection)` · `ref(nameOrGuid)` · `setProperty(name, val)` · `create_record(collection, title)`
+- `tp.file.title` — the active record's name
+- `tp.user.<fn>(…)` — reusable functions from the **Template Functions** collection
+- `tp.datacore.query(q)` · `count(q)` · `names(q)` · `evaluate(expr)` — live Plexus Datacore at apply time
+- `tp.brain.neighbours()` · `openTasks()` — the record's graph context
+- `tp.set(name, value)` / `tp.config` — scratch vars / plugin config
+
+Example: `<%* tp.set('n', await tp.datacore.count('@task and not $done')) %>You have <%* tp.get('n') %> open tasks.`
+
+### Embedded Datacore queries
+
+A body line starting with `dc:` (or `dc.js:`) is a live **Plexus Datacore** query. Use `| list` for a compact list (name + Type pill + snippet) or `| table: col, col` for columns; `| sort Field desc`, `| limit N`, `| grouped: Field`, `| card:`, `references(this.title)` for backlinks. Full DSL: see the Datacore plugin.
+
+```
+dc: @Captures and `Captured At` >= date(today) | list | sort `Captured At` desc
+dc: @"Rich Tasks" and `Task Status` != "Done" | table: $name, Priority, Due | sort Priority
+dc: references(this.title)
+```
 
 ## Frontmatter → properties
 
-If `Template Content` starts with a literal `---` line, the block up to the next `---` is parsed as `Key: Value` pairs and applied to the target record's typed properties. Choice properties use `setChoice`; datetime keys (matching `/date|due|at|when/i` or parseable values) are set via `DateTime`; everything else is plain text. The frontmatter block is stripped from the body, and the first non-empty body line (markers stripped, ~200 char cap) becomes the record **title**.
-
-Example template content:
+If `Template Content` starts with a `---` line, the block up to the next `---` is parsed as `Key: Value` and applied to the target record's typed properties: choice props use `setChoice`; datetime keys/values are parsed via `DateTime`; record values become relations; everything else is text. A frontmatter `Title:` sets the record title (dangling separators from empty optional tokens are trimmed). The block is stripped from the body.
 
 ```
 ---
-Status: In Progress
-Due: next friday
-Owner: Svyat
+Title: {{prompt.choice:Type :: Reference, Idea, Procedure, Summary}} · {{prompt:Title}}
+Type: {{prompt.choice:Type :: Reference, Idea, Procedure, Summary}}
+Topics: {{prompt.records:Topics :: Topics}}
+Source: {{prompt:Source ?? }}
 ---
-# Deviation {{prompt:Event ID}}
-- [ ] Draft investigation by {{date:+2 days}}
-- See {{ref:Deviation SOP}}  #qa
+## Summary
+{{prompt:One-line summary}}
+## Notes
+- Key point
+## 🔗 Backlinks
+dc: references(this.title)
 ```
 
-Result: a new record titled `Deviation <Event ID>`, with `Status` set to the choice "In Progress", `Due` set to next Friday's date, `Owner` set to "Svyat", and a body containing a heading, a task line with a datetime segment, and a bullet with a ref + hashtag segment.
+## Body authoring & nesting
 
-## Triggers
+The body can live two ways (toggle in the editor):
 
-The template's `Triggers` (choice, many) decide where output lands:
+- **Native outline** — the template record's own nested line items. Edit it in the normal Thymer outliner (drag to indent) **or** in the editor's Body textarea. Used as the body source whenever `Template Content` has no body text.
+- **Text** — a markdown block after the `---` in `Template Content`.
 
-| Trigger | Behavior |
+Either way, **a heading parents the lines beneath it**: `## Notes` then `- Key point` makes Key point a child of Notes. Opt out per template with `Variables (JSON)` `{"nest":"flat"}`.
+
+## Variables (JSON)
+
+A small JSON object on each template:
+
+| Key | Meaning |
 |---|---|
-| _none_ / `<Collection Name>` | Create a new record in that collection (default: active collection) |
-| `Append to current record` | Write body line items into the active record (no new record) |
-| `Update current record` | Apply frontmatter properties to the active record (and append any body) |
-| `auto:<Collection Name>` | On `record.created` in that collection, auto-apply (loop-guarded) |
+| `collection` | Target collection the template fills |
+| `nest: "flat"` | Disable heading-nesting (legacy flat body) |
+| `empty: "skip" \| "keep"` | How empty values are handled (default `skip` — empty props/lines dropped) |
+| `preview: true` | Show a schema-validating preview before create |
+| `defaults: { Name: value }` | Values for `{{var.Name}}` |
+
+## Title Pattern & Auto Title
+
+`Auto Title: On` + a `Title Pattern` titles records of the template's collection automatically (set-once-until-manual — it stops the moment you type your own title). Pattern tokens: `{{firstline}}` (first body line), `{{body}}` (whole body), `{{summary}}` (AI summary, needs `/llm`), or property tokens like `{{Type}} · {{Lead}}`. Commands: `Templater: Rename from properties`, `Templater: AI title this note`.
+
+## Triggers engine
+
+| Field | Behavior |
+|---|---|
+| `Trigger On: record.created:<Collection>` | **Auto-apply** when a new record is created in `<Collection>` (silent). Local UI creates fire automatically; remote/MCP creates need a `#auto` tag on the new record. |
+| `Trigger On: record.updated:<Collection>` | Re-apply on update |
+| `Trigger On: journal.open` / `app.open` | Fire when the journal opens / on app load |
+| `Schedule: 06:00 daily` (+ `Target`) | Time-based fire; `Target` = `journal:today`, a collection, append/update, etc. |
+| `Condition` | A predicate gate (Datacore expr / weekday / `Prop=val`); empty = always |
+| legacy `Triggers: auto:<Collection>` | Same as `Trigger On: record.created:<Collection>` |
+
+## Spine (`window.__templater`)
+
+For cross-plugin use (e.g. Quick Add): `render(content, prompts)`, `renderTemplateByName(name, prompts)`, `applyTemplateByName(name, {prompts, mode, collection})`, `runTrigger`, `checkSchedulesNow`, `composeTitle`, `autoTitleByGuid(guid, collName)`, `_instance` (debug). MCP `update_plugin_code` does NOT reach the web client — deploy via the Plugins Manager.
 
 ## Data model
 
-Templater reads from the live **Templates** collection and writes audit rows to **Template Applications** (looked up as "Template Log" first, then "Template Applications"). It creates no collections. See `CONSTANTS.md` for GUIDs.
+Reads the **Templates** collection; writes audit rows to a template-log collection if present. Creates no collections. See `CONSTANTS.md` for GUIDs.

@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.32.2 loaded — TEMPLATE EDITOR: command "Templater: Edit template…" opens a FORM (pick a property from the target collection schema + how it fills: Prompt/Choice/Date/Record/Static; Auto-apply toggle; Auto Title; Title Pattern) and writes the --- frontmatter + settings back to the record — no more hand-editing the cramped text field; the BODY stays edited natively. HEADING NESTING: a heading now PARENTS the lines beneath it (so "- Key point" under "## Notes" is a real child); opt out per template with Variables JSON {"nest":"flat"}. NATIVE-EDITOR AUTHORING: write a template\'s BODY as normal nested bullets/headings in the template record itself (WYSIWYG, drag-to-indent) and Templater reads it — frontmatter stays in the short Template Content --- block; used only when that text body is empty, so existing markdown templates are unchanged. PER-COLLECTION AUTO-APPLY: set a template\'s "Trigger On" = record.created:<Collection> and a NEW record in that collection auto-scaffolds (silent, no prompts; dangling-separator title junk now stripped so interactive templates auto-apply cleanly). Local UI creates fire automatically; remote/MCP creates need a #auto tag. +SPINE __templater.applyTemplateByName(name,{prompts,mode,collection}) runs the FULL apply pipeline headless (for the Quick Add plugin). AUTO-TITLE: type the body, the title builds itself. Per-collection via the template\'s "Auto Title" (Off/On) + "Title Pattern"; strategy inferred from the pattern tokens. {{firstline}} → titles from the first body line on every edit (debounced ~1.2s) — e.g. Notes. Property patterns ({{Type}} · {{Attendees}}) → auto-title on property edits. SET-ONCE-UNTIL-MANUAL: auto fills only while the title is blank/Untitled/auto-owned; the moment you type your own title it\'s locked (never fights you). On-demand: command "Templater: AI title this note" → a 4-6 word AI summary title (needs the /llm proxy on :8787). Manual: "Templater: Rename from properties" still works for any collection. Spine: __templater.aiTitleActive/autoTitleByGuid(guid,collName)/composeTitle. ——— RENAME FROM PROPERTIES + TRIGGERS ENGINE (schedule/event/condition; Daily Note @ 06:00 → journal:today) unchanged. Plus <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.33.0 loaded — FULL-CONTROL EDITOR: "Templater: Edit template…" now edits the BODY too (markdown textarea + Native-outline/Text storage toggle — Native is editable here AND in the doc), the raw Variables (JSON), plus property rows/Auto-apply/Auto Title/Title Pattern. AUTOCOMPLETE (Datacore-style) in every value field + body: type {{ for the token menu (with hints), {{record. for fields, dc: @ for collections. In-dialog Template-language reference + a fully rewritten README documenting every token. Earlier: the FORM editor writes the --- frontmatter + settings back to the record — no hand-editing the cramped text field. HEADING NESTING: a heading now PARENTS the lines beneath it (so "- Key point" under "## Notes" is a real child); opt out per template with Variables JSON {"nest":"flat"}. NATIVE-EDITOR AUTHORING: write a template\'s BODY as normal nested bullets/headings in the template record itself (WYSIWYG, drag-to-indent) and Templater reads it — frontmatter stays in the short Template Content --- block; used only when that text body is empty, so existing markdown templates are unchanged. PER-COLLECTION AUTO-APPLY: set a template\'s "Trigger On" = record.created:<Collection> and a NEW record in that collection auto-scaffolds (silent, no prompts; dangling-separator title junk now stripped so interactive templates auto-apply cleanly). Local UI creates fire automatically; remote/MCP creates need a #auto tag. +SPINE __templater.applyTemplateByName(name,{prompts,mode,collection}) runs the FULL apply pipeline headless (for the Quick Add plugin). AUTO-TITLE: type the body, the title builds itself. Per-collection via the template\'s "Auto Title" (Off/On) + "Title Pattern"; strategy inferred from the pattern tokens. {{firstline}} → titles from the first body line on every edit (debounced ~1.2s) — e.g. Notes. Property patterns ({{Type}} · {{Attendees}}) → auto-title on property edits. SET-ONCE-UNTIL-MANUAL: auto fills only while the title is blank/Untitled/auto-owned; the moment you type your own title it\'s locked (never fights you). On-demand: command "Templater: AI title this note" → a 4-6 word AI summary title (needs the /llm proxy on :8787). Manual: "Templater: Rename from properties" still works for any collection. Spine: __templater.aiTitleActive/autoTitleByGuid(guid,collName)/composeTitle. ——— RENAME FROM PROPERTIES + TRIGGERS ENGINE (schedule/event/condition; Daily Note @ 06:00 → journal:today) unchanged. Plus <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -1598,10 +1598,19 @@ class Plugin extends AppPlugin {
     const autoApply = /record\.created\s*:/i.test(triggerOn);
     let allColls = []; try { allColls = (await this.data.getAllCollections()).map(c => { try { return c.getName(); } catch (e) { return null; } }).filter(Boolean).sort((a, b) => a.localeCompare(b)); } catch (e) {}
     let schemaFields = []; try { const c = targetColl && await this.collectionByName(targetColl); if (c) schemaFields = await this._collectionFields(c); } catch (e) {}
+    // body state: native line items (preferred) win; else the text-prop body remainder.
+    let nativeBody = ''; try { nativeBody = await this.serializeBody(template); } catch (e) {}
+    const hasNativeBody = !!(nativeBody && nativeBody.trim());
+    const loadedBody = hasNativeBody ? nativeBody : (split.body || '');
+    const startStorage = hasNativeBody ? 'native' : ((split.body && split.body.trim()) ? 'text' : 'native');
+    const rawVars = this.tField(template, F_VARS) || '';
+    // autocomplete context (live — re-read schemaFields/allColls which change on target switch)
+    const getFields = () => schemaFields.map(f => f.label);
+    const getColls = () => allColls.slice();
 
     const overlay = document.createElement('div'); overlay.className = 'tmpl-overlay';
     const modal = document.createElement('div'); modal.className = 'tmpl-modal';
-    modal.innerHTML = '<h2>Edit template: ' + this.escape(this.tName(template)) + '</h2><div class="tmpl-sub">Properties set on a new record + settings. Edit the BODY in the normal editor — it\'s this template\'s own outline.</div>';
+    modal.innerHTML = '<h2>Edit template: ' + this.escape(this.tName(template)) + '</h2><div class="tmpl-sub">Full control — properties, body, settings, Variables JSON. Type <code>{{</code> for tokens, <code>dc: @</code> for collections. Body can also be edited in the normal outliner.</div>';
     // target collection
     const tcWrap = document.createElement('div'); tcWrap.className = 'tmpl-field';
     const tcLbl = document.createElement('label'); tcLbl.textContent = 'Fills a new record in'; tcWrap.appendChild(tcLbl);
@@ -1620,7 +1629,7 @@ class Plugin extends AppPlugin {
       const r = document.createElement('div'); r.style.display = 'flex'; r.style.gap = '6px'; r.style.marginBottom = '6px'; r.style.alignItems = 'center';
       const propSel = document.createElement('select'); propSel.style.flex = '0 0 28%';
       const modeSel = document.createElement('select'); modeSel.style.flex = '0 0 22%'; MODES.forEach(([v, l]) => { const o = document.createElement('option'); o.value = v; o.textContent = l; if (v === row.mode) o.selected = true; modeSel.appendChild(o); });
-      const valIn = document.createElement('input'); valIn.type = 'text'; valIn.style.flex = '1 1 auto'; valIn.value = row.value || ''; valIn.placeholder = PLACEHOLD[row.mode] || ''; this.attachInputGuards(valIn);
+      const valIn = document.createElement('input'); valIn.type = 'text'; valIn.style.flex = '1 1 auto'; valIn.value = row.value || ''; valIn.placeholder = PLACEHOLD[row.mode] || ''; this.attachInputGuards(valIn); this._attachAutocomplete(valIn, getFields, getColls);
       modeSel.onchange = () => { valIn.placeholder = PLACEHOLD[modeSel.value] || ''; };
       const del = document.createElement('button'); del.className = 'tmpl-btn'; del.textContent = '×'; del.title = 'Remove'; del.style.flex = '0 0 auto';
       del.onclick = () => { const i = rowCtls.findIndex(x => x.propSel === propSel); if (i >= 0) rowCtls.splice(i, 1); try { rowsHost.removeChild(r); } catch (e) {} };
@@ -1632,8 +1641,17 @@ class Plugin extends AppPlugin {
     const addBtn = document.createElement('button'); addBtn.className = 'tmpl-btn'; addBtn.textContent = '+ add property'; addBtn.style.marginBottom = '10px';
     addBtn.onclick = () => { const used = new Set(rowCtls.map(rc => rc.propSel.value)); const f = schemaFields.find(x => !used.has(x.label)); addRow(this._defaultRowForField(f)); };
     modal.appendChild(addBtn);
-    // re-fetch schema + rebuild prop dropdowns when the target collection changes
-    tcSel.onchange = async () => { try { const c = await this.collectionByName(tcSel.value); schemaFields = c ? await this._collectionFields(c) : []; } catch (e) { schemaFields = []; } rowCtls.forEach(rc => fillPropSel(rc.propSel, rc.propSel.value)); };
+    // re-fetch schema + rebuild prop dropdowns + sync Variables JSON collection when target changes
+    tcSel.onchange = async () => { try { const c = await this.collectionByName(tcSel.value); schemaFields = c ? await this._collectionFields(c) : []; } catch (e) { schemaFields = []; } rowCtls.forEach(rc => fillPropSel(rc.propSel, rc.propSel.value)); try { const vo = JSON.parse(varsTa.value || '{}'); vo.collection = tcSel.value; varsTa.value = JSON.stringify(vo, null, 2); } catch (e) {} };
+    // body (full control) — markdown textarea + a Native/Text storage toggle. Native = editable here AND in the doc.
+    const bodyWrap = document.createElement('div'); bodyWrap.className = 'tmpl-field';
+    const bodyLbl = document.createElement('label'); bodyLbl.textContent = "Body (the new record's outline)"; bodyWrap.appendChild(bodyLbl);
+    const bodyTa = document.createElement('textarea'); bodyTa.className = 'tmpl-body'; bodyTa.value = loadedBody; bodyTa.rows = 8; this.attachInputGuards(bodyTa); this._attachAutocomplete(bodyTa, getFields, getColls); bodyWrap.appendChild(bodyTa);
+    const stoWrap = document.createElement('div'); stoWrap.className = 'tmpl-storage'; stoWrap.appendChild(document.createTextNode('Store body as: '));
+    const mkRadio = (val, label) => { const id = 'tmpl-sto-' + val; const rb = document.createElement('input'); rb.type = 'radio'; rb.name = 'tmpl-body-storage'; rb.value = val; rb.id = id; if (val === startStorage) rb.checked = true; const lb = document.createElement('label'); lb.setAttribute('for', id); lb.textContent = ' ' + label + '   '; lb.style.display = 'inline'; lb.style.fontWeight = '400'; stoWrap.appendChild(rb); stoWrap.appendChild(lb); };
+    mkRadio('native', 'Native outline (editable in the doc)'); mkRadio('text', 'Text (in Template Content)');
+    bodyWrap.appendChild(stoWrap); modal.appendChild(bodyWrap);
+    const getStorage = () => { const r = stoWrap.querySelector('input[name="tmpl-body-storage"]:checked'); return r ? r.value : startStorage; };
     // settings
     const mkText = (labelText, val) => { const w = document.createElement('div'); w.className = 'tmpl-field'; const l = document.createElement('label'); l.textContent = labelText; w.appendChild(l); const i = document.createElement('input'); i.type = 'text'; i.value = val || ''; this.attachInputGuards(i); w.appendChild(i); modal.appendChild(w); return i; };
     const autoWrap = document.createElement('div'); autoWrap.className = 'tmpl-field';
@@ -1643,6 +1661,21 @@ class Plugin extends AppPlugin {
     const atWrap = document.createElement('div'); atWrap.className = 'tmpl-field'; const atL = document.createElement('label'); atL.textContent = 'Auto Title'; atWrap.appendChild(atL);
     const atSel = document.createElement('select'); ['Off', 'On'].forEach(o => { const op = document.createElement('option'); op.value = o; op.textContent = o; if (o === autoTitle) op.selected = true; atSel.appendChild(op); }); atWrap.appendChild(atSel); modal.appendChild(atWrap);
     const tpIn = mkText('Title Pattern (optional, e.g. {{firstline}} or {{Type}} · {{Lead}})', titlePattern);
+    this._attachAutocomplete(tpIn, getFields, getColls);
+    // advanced — raw Variables (JSON), editable
+    const adv = document.createElement('details'); adv.className = 'tmpl-details';
+    const advS = document.createElement('summary'); advS.textContent = 'Advanced — Variables (JSON)'; adv.appendChild(advS);
+    const varsTa = document.createElement('textarea'); varsTa.className = 'tmpl-body'; varsTa.rows = 4; varsTa.spellcheck = false;
+    try { varsTa.value = rawVars && rawVars.trim() ? JSON.stringify(JSON.parse(rawVars), null, 2) : (rawVars || ''); } catch (e) { varsTa.value = rawVars || ''; }
+    this.attachInputGuards(varsTa);
+    const advHint = document.createElement('div'); advHint.className = 'tmpl-sub'; advHint.innerHTML = 'Keys: <code>collection</code>, <code>nest:"flat"</code>, <code>empty:"skip"|"keep"</code>, <code>preview:true</code>, <code>defaults:{Name:value}</code> (→ <code>{{var.Name}}</code>).';
+    adv.appendChild(varsTa); adv.appendChild(advHint); modal.appendChild(adv);
+    // language reference
+    const ref = document.createElement('details'); ref.className = 'tmpl-details';
+    const refS = document.createElement('summary'); refS.textContent = 'Template language reference'; ref.appendChild(refS);
+    const refList = document.createElement('div'); refList.className = 'tmpl-ref';
+    this._templateTokens().forEach(t => { const row = document.createElement('div'); row.className = 'tmpl-ref-row'; row.innerHTML = '<code>' + this.escape(t.insert) + '</code> <span>' + this.escape(t.hint || '') + '</span>'; refList.appendChild(row); });
+    ref.appendChild(refList); modal.appendChild(ref);
     // actions
     const actions = document.createElement('div'); actions.className = 'tmpl-actions';
     const cancel = document.createElement('button'); cancel.className = 'tmpl-btn'; cancel.textContent = 'Cancel';
@@ -1653,28 +1686,120 @@ class Plugin extends AppPlugin {
     cancel.onclick = () => { if (done) return; done = true; close(); };
     overlay.onclick = (e) => { if (e.target === overlay) { if (done) return; done = true; close(); } };
     modal.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); save.click(); } if (e.key === 'Escape') { e.preventDefault(); cancel.click(); } });
-    save.onclick = () => {
-      if (done) return; done = true;
+    save.onclick = async () => {
+      if (done) return;
+      // validate Variables JSON BEFORE committing — abort (keep modal open) on bad JSON
+      let vo = {};
+      const vraw = (varsTa.value || '').trim();
+      if (vraw) { try { vo = JSON.parse(vraw); if (!vo || typeof vo !== 'object') throw new Error('not an object'); } catch (e) { this.toast('Templater', 'Variables (JSON) is not valid — fix or clear it.'); return; } }
+      done = true;
       try {
         const tcoll = tcSel.value || targetColl;
-        // rebuild frontmatter block from the rows
+        // frontmatter block from the rows
         const fmLines = ['---'];
         for (const rc of rowCtls) { const key = (rc.propSel.value || '').trim(); if (!key) continue; fmLines.push(this._serializeFmRow(key, rc.modeSel.value, rc.valIn.value)); }
         fmLines.push('---');
         const fmBlock = fmLines.length > 2 ? fmLines.join('\n') : '';
-        const body = split.body || '';
-        const newContent = fmBlock ? (body.trim() ? (fmBlock + '\n' + body) : fmBlock) : body;
-        try { const p = template.prop(F_CONTENT); if (p && p.set) p.set(newContent); } catch (e) { console.warn('[Templater] editor: content set', e); }
+        // body — by storage mode; only rebuild native lines when the body actually changed
+        const storage = getStorage();
+        const bodyVal = bodyTa.value || '';
+        const bodyChanged = (bodyVal !== loadedBody) || (storage !== startStorage);
+        if (storage === 'text') {
+          const newContent = fmBlock ? (bodyVal.trim() ? (fmBlock + '\n' + bodyVal) : fmBlock) : bodyVal;
+          try { const p = template.prop(F_CONTENT); if (p && p.set) p.set(newContent); } catch (e) { console.warn('[Templater] editor: content set', e); }
+          if (hasNativeBody) { try { await this._clearBody(template); } catch (e) { console.warn('[Templater] clearBody', e); } } // body now lives in text — drop native dup
+        } else { // native
+          try { const p = template.prop(F_CONTENT); if (p && p.set) p.set(fmBlock); } catch (e) { console.warn('[Templater] editor: content set', e); }
+          if (bodyChanged) { try { await this._clearBody(template); } catch (e) { console.warn('[Templater] clearBody', e); } if (bodyVal.trim()) { try { await this.writeBody(template, bodyVal, { flat: vo && vo.nest === 'flat' }); } catch (e) { console.warn('[Templater] writeBody', e); } } }
+        }
         // settings
         try { const p = template.prop(F_TITLEPATTERN); if (p && p.set) p.set((tpIn.value || '').trim()); } catch (e) {}
         try { const p = template.prop(F_AUTOTITLE); if (p && p.setChoice) p.setChoice(atSel.value); } catch (e) {}
         try { const p = template.prop(F_TRIGGERON); if (p && p.set) p.set(autoChk.checked && tcoll ? ('record.created:' + tcoll) : ''); } catch (e) {}
-        // target collection -> Variables JSON (preserve other keys)
-        try { let vo = {}; const raw = this.tField(template, F_VARS); if (raw && raw.trim()) { try { vo = JSON.parse(raw) || {}; } catch (e) { vo = {}; } } if (tcoll) vo.collection = tcoll; const vp = template.prop(F_VARS); if (vp && vp.set) vp.set(JSON.stringify(vo)); } catch (e) {}
+        // Variables JSON (validated above) — force collection = the dropdown, then write verbatim
+        try { if (tcoll) vo.collection = tcoll; const vp = template.prop(F_VARS); if (vp && vp.set) vp.set(JSON.stringify(vo)); } catch (e) {}
         close();
         this.toast('Templater', 'Saved "' + this.tName(template) + '"');
       } catch (e) { console.warn('[Templater] editor save failed', e); this.toast('Templater', 'Save failed — see console.'); }
     };
+  }
+
+  // Delete a record's body line items, deepest-first (the SDK rejects deleting an item that still has children).
+  async _clearBody(record) {
+    let items = []; try { items = await record.getLineItems(false); } catch (e) { return; }
+    if (!items || !items.length) return;
+    const recGuid = record.guid || (record.getGuid && record.getGuid());
+    const byGuid = new Map(items.map(it => [it.guid, it]));
+    const depth = (it) => { let d = 0, p = it.parent_guid, n = 0; while (p && p !== recGuid && byGuid.has(p) && n++ < 64) { d++; p = byGuid.get(p).parent_guid; } return d; };
+    items.sort((a, b) => depth(b) - depth(a));
+    for (const it of items) { try { await it.delete(); } catch (e) {} }
+  }
+
+  // The full template-language vocabulary — drives the editor autocomplete AND the in-dialog reference.
+  _templateTokens() {
+    return [
+      { key: 'prompt:', insert: '{{prompt:Label}}', caret: 'Label', hint: 'ask for text (?? default optional)' },
+      { key: 'prompt.choice:', insert: '{{prompt.choice:Label :: A, B, C}}', caret: 'Label', hint: 'pick one of a list' },
+      { key: 'prompt.record:', insert: '{{prompt.record:Label :: Collection}}', caret: 'Label', hint: 'pick one record' },
+      { key: 'prompt.records:', insert: '{{prompt.records:Label :: Collection}}', caret: 'Label', hint: 'pick records (multi)' },
+      { key: 'date', insert: '{{date}}', hint: 'today (date segment)' },
+      { key: 'date:', insert: '{{date:YYYY-MM-DD}}', caret: 'YYYY-MM-DD', hint: 'formatted / natural / +7 / +7@Start Date' },
+      { key: 'record.', insert: '{{record.Property}}', caret: 'Property', hint: 'value from the target record' },
+      { key: 'var.', insert: '{{var.Name}}', caret: 'Name', hint: 'from Variables JSON defaults' },
+      { key: 'ref:', insert: '{{ref:Name}}', caret: 'Name', hint: 'reference a record (segment)' },
+      { key: 'tag:', insert: '{{tag:tag}}', caret: 'tag', hint: 'hashtag segment' },
+      { key: 'ai::', insert: '{{ai:: instruction}}', caret: 'instruction', hint: 'inline AI text (needs /llm)' },
+      { key: 'task:', insert: '{{task:Title | due=+3 days}}', caret: 'Title', hint: 'spawn a linked Rich Task' },
+      { key: 'cursor', insert: '{{cursor}}', hint: 'place the cursor here after apply' },
+      { key: 'banner:', insert: '{{banner:https://}}', caret: 'https://', hint: 'set the record banner from a URL' },
+      { key: 'relate:', insert: '{{relate:Field=Name}}', caret: 'Field', hint: 'set a relation property' },
+      { key: 'include:', insert: '{{include:Template}}', caret: 'Template', hint: 'inline another template' },
+      { key: 'schedule:', insert: '{{schedule:date}}', caret: 'date', hint: 'datetime segment (alias of date)' },
+      { key: 'firstline', insert: '{{firstline}}', hint: 'first body line (Title Pattern)' },
+      { key: 'body', insert: '{{body}}', hint: 'whole body text (Title Pattern)' },
+      { key: 'summary', insert: '{{summary}}', hint: 'AI summary (Title Pattern)' },
+    ];
+  }
+
+  // Lightweight autocomplete on an <input>/<textarea>: {{ token menu · {{record. fields · dc: @ collections.
+  _attachAutocomplete(el, getFields, getColls) {
+    const tokens = this._templateTokens();
+    let menu = null, items = [], active = -1;
+    const esc = (s) => this.escape(String(s == null ? '' : s));
+    const closeMenu = () => { if (menu) { try { menu.remove(); } catch (e) {} } menu = null; items = []; active = -1; el._acCtx = null; };
+    const render = () => {
+      if (!menu) { menu = document.createElement('div'); menu.className = 'tmpl-ac'; document.body.appendChild(menu); }
+      menu.innerHTML = '';
+      items.forEach((it, i) => { const d = document.createElement('div'); d.className = 'tmpl-ac-item' + (i === active ? ' active' : ''); d.innerHTML = '<span class="tmpl-ac-k">' + esc(it.label) + '</span>' + (it.hint ? '<span class="tmpl-ac-h">' + esc(it.hint) + '</span>' : ''); d.onmousedown = (ev) => { ev.preventDefault(); accept(i); }; menu.appendChild(d); });
+      const r = el.getBoundingClientRect(); menu.style.left = r.left + 'px'; menu.style.top = (r.bottom + 2) + 'px'; menu.style.minWidth = Math.max(240, r.width) + 'px';
+    };
+    const ctx = () => {
+      const before = el.value.slice(0, el.selectionStart || 0);
+      const line = before.slice(before.lastIndexOf('\n') + 1);
+      let m;
+      if (/^\s*dc(\.js)?:/i.test(line) && (m = before.match(/@"?([\w ]*)$/))) { const part = m[1] || ''; const cs = (getColls && getColls()) || []; return { re: /@"?[\w ]*$/, opts: cs.filter(c => c.toLowerCase().includes(part.toLowerCase())).map(c => ({ label: c, insert: '@' + (/\s/.test(c) ? ('"' + c + '"') : c) })) }; }
+      if ((m = before.match(/\{\{record\.([\w ]*)$/))) { const part = m[1] || ''; const fs = (getFields && getFields()) || []; return { re: /\{\{record\.[\w ]*$/, opts: fs.filter(f => f.toLowerCase().includes(part.toLowerCase())).map(f => ({ label: f, insert: '{{record.' + f + '}}' })) }; }
+      if ((m = before.match(/\{\{prompt\.records?:[^}]*::\s*([\w ]*)$/))) { const part = m[1] || ''; const cs = (getColls && getColls()) || []; return { re: /[\w ]*$/, opts: cs.filter(c => c.toLowerCase().includes(part.toLowerCase())).map(c => ({ label: c, insert: c })) }; }
+      if ((m = before.match(/\{\{([\w.:]*)$/))) { const part = (m[1] || '').toLowerCase(); return { re: /\{\{[\w.:]*$/, opts: tokens.filter(t => t.key.toLowerCase().startsWith(part)).map(t => ({ label: t.insert, hint: t.hint, insert: t.insert, caret: t.caret })) }; }
+      return null;
+    };
+    const update = () => { const c = ctx(); if (!c || !c.opts.length) { closeMenu(); return; } items = c.opts.slice(0, 9); active = 0; el._acCtx = c; render(); };
+    const accept = (i) => {
+      const c = el._acCtx; if (!c || !items[i]) { closeMenu(); return; }
+      const it = items[i]; const caret = el.selectionStart || 0; const before = el.value.slice(0, caret), after = el.value.slice(caret);
+      const newBefore = before.replace(c.re, it.insert); el.value = newBefore + after;
+      if (it.caret) { const idx = newBefore.lastIndexOf(it.caret); if (idx >= 0) { try { el.setSelectionRange(idx, idx + it.caret.length); } catch (e) {} closeMenu(); el.focus(); return; } }
+      const pos = newBefore.length; try { el.setSelectionRange(pos, pos); } catch (e) {} closeMenu(); el.focus();
+    };
+    el.addEventListener('input', update);
+    el.addEventListener('keydown', (ev) => {
+      if (!menu) return;
+      if (ev.key === 'ArrowDown') { ev.preventDefault(); ev.stopPropagation(); active = (active + 1) % items.length; render(); }
+      else if (ev.key === 'ArrowUp') { ev.preventDefault(); ev.stopPropagation(); active = (active - 1 + items.length) % items.length; render(); }
+      else if (ev.key === 'Enter' || ev.key === 'Tab') { ev.preventDefault(); ev.stopPropagation(); accept(active); }
+      else if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); closeMenu(); }
+    });
+    el.addEventListener('blur', () => setTimeout(closeMenu, 150));
   }
 
   // TP-20: best-effort call to the local generative endpoint (task-search proxy /llm on :8787).
