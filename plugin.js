@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.33.0 loaded — FULL-CONTROL EDITOR: "Templater: Edit template…" now edits the BODY too (markdown textarea + Native-outline/Text storage toggle — Native is editable here AND in the doc), the raw Variables (JSON), plus property rows/Auto-apply/Auto Title/Title Pattern. AUTOCOMPLETE (Datacore-style) in every value field + body: type {{ for the token menu (with hints), {{record. for fields, dc: @ for collections. In-dialog Template-language reference + a fully rewritten README documenting every token. Earlier: the FORM editor writes the --- frontmatter + settings back to the record — no hand-editing the cramped text field. HEADING NESTING: a heading now PARENTS the lines beneath it (so "- Key point" under "## Notes" is a real child); opt out per template with Variables JSON {"nest":"flat"}. NATIVE-EDITOR AUTHORING: write a template\'s BODY as normal nested bullets/headings in the template record itself (WYSIWYG, drag-to-indent) and Templater reads it — frontmatter stays in the short Template Content --- block; used only when that text body is empty, so existing markdown templates are unchanged. PER-COLLECTION AUTO-APPLY: set a template\'s "Trigger On" = record.created:<Collection> and a NEW record in that collection auto-scaffolds (silent, no prompts; dangling-separator title junk now stripped so interactive templates auto-apply cleanly). Local UI creates fire automatically; remote/MCP creates need a #auto tag. +SPINE __templater.applyTemplateByName(name,{prompts,mode,collection}) runs the FULL apply pipeline headless (for the Quick Add plugin). AUTO-TITLE: type the body, the title builds itself. Per-collection via the template\'s "Auto Title" (Off/On) + "Title Pattern"; strategy inferred from the pattern tokens. {{firstline}} → titles from the first body line on every edit (debounced ~1.2s) — e.g. Notes. Property patterns ({{Type}} · {{Attendees}}) → auto-title on property edits. SET-ONCE-UNTIL-MANUAL: auto fills only while the title is blank/Untitled/auto-owned; the moment you type your own title it\'s locked (never fights you). On-demand: command "Templater: AI title this note" → a 4-6 word AI summary title (needs the /llm proxy on :8787). Manual: "Templater: Rename from properties" still works for any collection. Spine: __templater.aiTitleActive/autoTitleByGuid(guid,collName)/composeTitle. ——— RENAME FROM PROPERTIES + TRIGGERS ENGINE (schedule/event/condition; Daily Note @ 06:00 → journal:today) unchanged. Plus <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.34.0 loaded — editor: "Fills a new record in" now offers "— none (ask on apply) —" (unpinned template — apply-time picker chooses the collection; auto-apply disabled when none); "Templater: New template…" command (+ "＋ New template…" in the edit picker) creates a template via this dialog; fixed the auto-apply checkbox layout (was detached from its label) + clearer wording. FULL-CONTROL EDITOR: "Templater: Edit template…" now edits the BODY too (markdown textarea + Native-outline/Text storage toggle — Native is editable here AND in the doc), the raw Variables (JSON), plus property rows/Auto-apply/Auto Title/Title Pattern. AUTOCOMPLETE (Datacore-style) in every value field + body: type {{ for the token menu (with hints), {{record. for fields, dc: @ for collections. In-dialog Template-language reference + a fully rewritten README documenting every token. Earlier: the FORM editor writes the --- frontmatter + settings back to the record — no hand-editing the cramped text field. HEADING NESTING: a heading now PARENTS the lines beneath it (so "- Key point" under "## Notes" is a real child); opt out per template with Variables JSON {"nest":"flat"}. NATIVE-EDITOR AUTHORING: write a template\'s BODY as normal nested bullets/headings in the template record itself (WYSIWYG, drag-to-indent) and Templater reads it — frontmatter stays in the short Template Content --- block; used only when that text body is empty, so existing markdown templates are unchanged. PER-COLLECTION AUTO-APPLY: set a template\'s "Trigger On" = record.created:<Collection> and a NEW record in that collection auto-scaffolds (silent, no prompts; dangling-separator title junk now stripped so interactive templates auto-apply cleanly). Local UI creates fire automatically; remote/MCP creates need a #auto tag. +SPINE __templater.applyTemplateByName(name,{prompts,mode,collection}) runs the FULL apply pipeline headless (for the Quick Add plugin). AUTO-TITLE: type the body, the title builds itself. Per-collection via the template\'s "Auto Title" (Off/On) + "Title Pattern"; strategy inferred from the pattern tokens. {{firstline}} → titles from the first body line on every edit (debounced ~1.2s) — e.g. Notes. Property patterns ({{Type}} · {{Attendees}}) → auto-title on property edits. SET-ONCE-UNTIL-MANUAL: auto fills only while the title is blank/Untitled/auto-owned; the moment you type your own title it\'s locked (never fights you). On-demand: command "Templater: AI title this note" → a 4-6 word AI summary title (needs the /llm proxy on :8787). Manual: "Templater: Rename from properties" still works for any collection. Spine: __templater.aiTitleActive/autoTitleByGuid(guid,collName)/composeTitle. ——— RENAME FROM PROPERTIES + TRIGGERS ENGINE (schedule/event/condition; Daily Note @ 06:00 → journal:today) unchanged. Plus <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -157,6 +157,11 @@ class Plugin extends AppPlugin {
       const ecmd = this.ui.addCommandPaletteCommand({ label: "Templater: Edit template…", icon: "ti-edit", onSelected: () => plugin.editTemplateCommand() });
       if (ecmd && ecmd.remove) this._state.disposers.push(() => { try { ecmd.remove(); } catch (e) {} });
     } catch (e) { console.warn('[Templater] edit-template cmd add failed:', e); }
+    // New-template command — create a template record + open the editor on it
+    try {
+      const ncmd = this.ui.addCommandPaletteCommand({ label: "Templater: New template…", icon: "ti-plus", onSelected: () => plugin.newTemplateCommand() });
+      if (ncmd && ncmd.remove) this._state.disposers.push(() => { try { ncmd.remove(); } catch (e) {} });
+    } catch (e) { console.warn('[Templater] new-template cmd add failed:', e); }
 
     // Programmatic render seam (verification + cross-plugin use): render a template string with
     // pre-supplied prompt answers, no UI. Returns the rendered {title, properties, body} string.
@@ -1521,12 +1526,26 @@ class Plugin extends AppPlugin {
       if (ar && ac && ac.getName && ac.getName() === TEMPLATES_COLL) tmpl = ar;
     } catch (e) {}
     if (tmpl) return this.openTemplateEditor(tmpl);
-    const records = await this.loadTemplatesSorted();
-    if (!records || !records.length) { this.toast('Templater', 'No templates found.'); return; }
-    const names = records.map(r => this.tName(r));
-    const idx = await this.asyncSuggester('Edit which template?', names);
+    const recs = (await this.loadTemplatesSorted()) || [];
+    const names = ['＋ New template…'].concat(recs.map(r => this.tName(r)));
+    const idx = await this.asyncSuggester('Edit a template (or create one)', names);
     if (idx == null || idx < 0) return;
-    if (records[idx]) this.openTemplateEditor(records[idx]);
+    if (idx === 0) return this.newTemplateCommand();
+    if (recs[idx - 1]) this.openTemplateEditor(recs[idx - 1]);
+  }
+
+  // Create a brand-new template record and open the editor on it.
+  async newTemplateCommand() {
+    const name = await this.asyncPrompt('New template name', '');
+    if (!name || !name.trim()) return;
+    const coll = await this.collectionByName(TEMPLATES_COLL);
+    if (!coll) { this.toast('Templater', '"' + TEMPLATES_COLL + '" collection not found.'); return; }
+    let guid; try { guid = coll.createRecord(name.trim()); } catch (e) { this.toast('Templater', 'Could not create the template.'); return; }
+    if (!guid) { this.toast('Templater', 'Could not create the template.'); return; }
+    const rec = await this.pollRecord(guid);
+    if (!rec) { this.toast('Templater', 'Created, but could not load it — open it from the Templates collection.'); return; }
+    try { const p = rec.prop(F_NAME); if (p && p.set) p.set(name.trim()); } catch (e) {}
+    this.openTemplateEditor(rec);
   }
 
   // split a Template Content string into the leading ---…--- block (raw) + the body remainder.
@@ -1616,6 +1635,7 @@ class Plugin extends AppPlugin {
     const tcLbl = document.createElement('label'); tcLbl.textContent = 'Fills a new record in'; tcWrap.appendChild(tcLbl);
     const tcSel = document.createElement('select');
     if (!allColls.includes(targetColl) && targetColl) allColls = [targetColl].concat(allColls);
+    const noneOpt = document.createElement('option'); noneOpt.value = ''; noneOpt.textContent = '— none (ask which collection on apply) —'; if (!targetColl) noneOpt.selected = true; tcSel.appendChild(noneOpt);
     allColls.forEach(n => { const o = document.createElement('option'); o.value = n; o.textContent = n; if (n === targetColl) o.selected = true; tcSel.appendChild(o); });
     tcWrap.appendChild(tcSel); modal.appendChild(tcWrap);
     // properties section
@@ -1642,7 +1662,7 @@ class Plugin extends AppPlugin {
     addBtn.onclick = () => { const used = new Set(rowCtls.map(rc => rc.propSel.value)); const f = schemaFields.find(x => !used.has(x.label)); addRow(this._defaultRowForField(f)); };
     modal.appendChild(addBtn);
     // re-fetch schema + rebuild prop dropdowns + sync Variables JSON collection when target changes
-    tcSel.onchange = async () => { try { const c = await this.collectionByName(tcSel.value); schemaFields = c ? await this._collectionFields(c) : []; } catch (e) { schemaFields = []; } rowCtls.forEach(rc => fillPropSel(rc.propSel, rc.propSel.value)); try { const vo = JSON.parse(varsTa.value || '{}'); vo.collection = tcSel.value; varsTa.value = JSON.stringify(vo, null, 2); } catch (e) {} };
+    tcSel.onchange = async () => { try { const c = tcSel.value && await this.collectionByName(tcSel.value); schemaFields = c ? await this._collectionFields(c) : []; } catch (e) { schemaFields = []; } rowCtls.forEach(rc => fillPropSel(rc.propSel, rc.propSel.value)); try { autoChk.disabled = !tcSel.value; if (!tcSel.value) autoChk.checked = false; } catch (e) {} try { const vo = JSON.parse(varsTa.value || '{}'); if (tcSel.value) vo.collection = tcSel.value; else delete vo.collection; varsTa.value = JSON.stringify(vo, null, 2); } catch (e) {} };
     // body (full control) — markdown textarea + a Native/Text storage toggle. Native = editable here AND in the doc.
     const bodyWrap = document.createElement('div'); bodyWrap.className = 'tmpl-field';
     const bodyLbl = document.createElement('label'); bodyLbl.textContent = "Body (the new record's outline)"; bodyWrap.appendChild(bodyLbl);
@@ -1654,9 +1674,9 @@ class Plugin extends AppPlugin {
     const getStorage = () => { const r = stoWrap.querySelector('input[name="tmpl-body-storage"]:checked'); return r ? r.value : startStorage; };
     // settings
     const mkText = (labelText, val) => { const w = document.createElement('div'); w.className = 'tmpl-field'; const l = document.createElement('label'); l.textContent = labelText; w.appendChild(l); const i = document.createElement('input'); i.type = 'text'; i.value = val || ''; this.attachInputGuards(i); w.appendChild(i); modal.appendChild(w); return i; };
-    const autoWrap = document.createElement('div'); autoWrap.className = 'tmpl-field';
-    const autoChk = document.createElement('input'); autoChk.type = 'checkbox'; autoChk.checked = autoApply; autoChk.id = 'tmpl-autoapply';
-    const autoLbl = document.createElement('label'); autoLbl.setAttribute('for', 'tmpl-autoapply'); autoLbl.textContent = ' Auto-apply to new records in this collection'; autoLbl.style.display = 'inline'; autoLbl.style.fontWeight = '400';
+    const autoWrap = document.createElement('div'); autoWrap.className = 'tmpl-check';
+    const autoChk = document.createElement('input'); autoChk.type = 'checkbox'; autoChk.checked = autoApply; autoChk.id = 'tmpl-autoapply'; autoChk.disabled = !targetColl;
+    const autoLbl = document.createElement('label'); autoLbl.setAttribute('for', 'tmpl-autoapply'); autoLbl.textContent = 'Auto-apply — scaffold this template automatically whenever a new record is created in the target collection (no prompts). Needs a target collection above.';
     autoWrap.appendChild(autoChk); autoWrap.appendChild(autoLbl); modal.appendChild(autoWrap);
     const atWrap = document.createElement('div'); atWrap.className = 'tmpl-field'; const atL = document.createElement('label'); atL.textContent = 'Auto Title'; atWrap.appendChild(atL);
     const atSel = document.createElement('select'); ['Off', 'On'].forEach(o => { const op = document.createElement('option'); op.value = o; op.textContent = o; if (o === autoTitle) op.selected = true; atSel.appendChild(op); }); atWrap.appendChild(atSel); modal.appendChild(atWrap);
@@ -1717,7 +1737,7 @@ class Plugin extends AppPlugin {
         try { const p = template.prop(F_AUTOTITLE); if (p && p.setChoice) p.setChoice(atSel.value); } catch (e) {}
         try { const p = template.prop(F_TRIGGERON); if (p && p.set) p.set(autoChk.checked && tcoll ? ('record.created:' + tcoll) : ''); } catch (e) {}
         // Variables JSON (validated above) — force collection = the dropdown, then write verbatim
-        try { if (tcoll) vo.collection = tcoll; const vp = template.prop(F_VARS); if (vp && vp.set) vp.set(JSON.stringify(vo)); } catch (e) {}
+        try { if (tcoll) vo.collection = tcoll; else delete vo.collection; const vp = template.prop(F_VARS); if (vp && vp.set) vp.set(JSON.stringify(vo)); } catch (e) {}
         close();
         this.toast('Templater', 'Saved "' + this.tName(template) + '"');
       } catch (e) { console.warn('[Templater] editor save failed', e); this.toast('Templater', 'Save failed — see console.'); }

@@ -211,3 +211,16 @@
 .tmpl-ac-item.active, .tmpl-ac-item:hover { background: var(--sidebar-bg-hover); }
 .tmpl-ac-k { font-family: ui-monospace, SF Mono, Menlo, monospace; color: var(--color-text-400); }
 .tmpl-ac-h { color: var(--color-text-600); font-size: 11px; }
+
+/* v2.34 — auto-apply checkbox row (inline checkbox + label; the old .tmpl-field flex-column detached them) */
+.tmpl-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 14px;
+  font-size: 12px;
+  color: var(--color-text-600);
+}
+.tmpl-check input[type="checkbox"] { margin-top: 2px; flex: 0 0 auto; }
+.tmpl-check label { font-weight: 400; line-height: 1.4; }
+.tmpl-check input:disabled + label { opacity: 0.55; }
