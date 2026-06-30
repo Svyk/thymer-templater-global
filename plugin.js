@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.34.0 loaded — editor: "Fills a new record in" now offers "— none (ask on apply) —" (unpinned template — apply-time picker chooses the collection; auto-apply disabled when none); "Templater: New template…" command (+ "＋ New template…" in the edit picker) creates a template via this dialog; fixed the auto-apply checkbox layout (was detached from its label) + clearer wording. FULL-CONTROL EDITOR: "Templater: Edit template…" now edits the BODY too (markdown textarea + Native-outline/Text storage toggle — Native is editable here AND in the doc), the raw Variables (JSON), plus property rows/Auto-apply/Auto Title/Title Pattern. AUTOCOMPLETE (Datacore-style) in every value field + body: type {{ for the token menu (with hints), {{record. for fields, dc: @ for collections. In-dialog Template-language reference + a fully rewritten README documenting every token. Earlier: the FORM editor writes the --- frontmatter + settings back to the record — no hand-editing the cramped text field. HEADING NESTING: a heading now PARENTS the lines beneath it (so "- Key point" under "## Notes" is a real child); opt out per template with Variables JSON {"nest":"flat"}. NATIVE-EDITOR AUTHORING: write a template\'s BODY as normal nested bullets/headings in the template record itself (WYSIWYG, drag-to-indent) and Templater reads it — frontmatter stays in the short Template Content --- block; used only when that text body is empty, so existing markdown templates are unchanged. PER-COLLECTION AUTO-APPLY: set a template\'s "Trigger On" = record.created:<Collection> and a NEW record in that collection auto-scaffolds (silent, no prompts; dangling-separator title junk now stripped so interactive templates auto-apply cleanly). Local UI creates fire automatically; remote/MCP creates need a #auto tag. +SPINE __templater.applyTemplateByName(name,{prompts,mode,collection}) runs the FULL apply pipeline headless (for the Quick Add plugin). AUTO-TITLE: type the body, the title builds itself. Per-collection via the template\'s "Auto Title" (Off/On) + "Title Pattern"; strategy inferred from the pattern tokens. {{firstline}} → titles from the first body line on every edit (debounced ~1.2s) — e.g. Notes. Property patterns ({{Type}} · {{Attendees}}) → auto-title on property edits. SET-ONCE-UNTIL-MANUAL: auto fills only while the title is blank/Untitled/auto-owned; the moment you type your own title it\'s locked (never fights you). On-demand: command "Templater: AI title this note" → a 4-6 word AI summary title (needs the /llm proxy on :8787). Manual: "Templater: Rename from properties" still works for any collection. Spine: __templater.aiTitleActive/autoTitleByGuid(guid,collName)/composeTitle. ——— RENAME FROM PROPERTIES + TRIGGERS ENGINE (schedule/event/condition; Daily Note @ 06:00 → journal:today) unchanged. Plus <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.35.0 loaded — editor: "Fills a new record in" now offers "— none (ask on apply) —" (unpinned template — apply-time picker chooses the collection; auto-apply disabled when none); "Templater: New template…" command (+ "＋ New template…" in the edit picker) creates a template via this dialog; fixed the auto-apply checkbox layout (was detached from its label) + clearer wording. FULL-CONTROL EDITOR: "Templater: Edit template…" now edits the BODY too (markdown textarea + Native-outline/Text storage toggle — Native is editable here AND in the doc), the raw Variables (JSON), plus property rows/Auto-apply/Auto Title/Title Pattern. AUTOCOMPLETE (Datacore-style) in every value field + body: type {{ for the token menu (with hints), {{record. for fields, dc: @ for collections. In-dialog Template-language reference + a fully rewritten README documenting every token. Earlier: the FORM editor writes the --- frontmatter + settings back to the record — no hand-editing the cramped text field. HEADING NESTING: a heading now PARENTS the lines beneath it (so "- Key point" under "## Notes" is a real child); opt out per template with Variables JSON {"nest":"flat"}. NATIVE-EDITOR AUTHORING: write a template\'s BODY as normal nested bullets/headings in the template record itself (WYSIWYG, drag-to-indent) and Templater reads it — frontmatter stays in the short Template Content --- block; used only when that text body is empty, so existing markdown templates are unchanged. PER-COLLECTION AUTO-APPLY: set a template\'s "Trigger On" = record.created:<Collection> and a NEW record in that collection auto-scaffolds (silent, no prompts; dangling-separator title junk now stripped so interactive templates auto-apply cleanly). Local UI creates fire automatically; remote/MCP creates need a #auto tag. +SPINE __templater.applyTemplateByName(name,{prompts,mode,collection}) runs the FULL apply pipeline headless (for the Quick Add plugin). AUTO-TITLE: type the body, the title builds itself. Per-collection via the template\'s "Auto Title" (Off/On) + "Title Pattern"; strategy inferred from the pattern tokens. {{firstline}} → titles from the first body line on every edit (debounced ~1.2s) — e.g. Notes. Property patterns ({{Type}} · {{Attendees}}) → auto-title on property edits. SET-ONCE-UNTIL-MANUAL: auto fills only while the title is blank/Untitled/auto-owned; the moment you type your own title it\'s locked (never fights you). On-demand: command "Templater: AI title this note" → a 4-6 word AI summary title (needs the /llm proxy on :8787). Manual: "Templater: Rename from properties" still works for any collection. Spine: __templater.aiTitleActive/autoTitleByGuid(guid,collName)/composeTitle. ——— RENAME FROM PROPERTIES + TRIGGERS ENGINE (schedule/event/condition; Daily Note @ 06:00 → journal:today) unchanged. Plus <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -35,6 +35,7 @@ const F_AUTOTITLE = "Auto Title";       // choice Off/On — auto-title records 
 const AUTOTITLE_DEBOUNCE_MS = 1200;     // per-record debounce for body-strategy auto-title
 const SCHED_TICK_MS = 60000;       // schedule engine tick
 const TRIGGER_TTL_MS = 30000;      // trigger-index cache TTL
+const ATTR_COLL_GUID = "11NPMCN3MWHA6GGQCPSQNZP9TM";  // the Attributes collection ({{attr:Key}} token source)
 const JOURNAL_COLL_GUID = "16S1WSXAWSHVHJZ72G6J3JRTCP";
 
 // Non-greedy, sentinel-delimited markers carried through render -> segment writer.
@@ -416,7 +417,7 @@ class Plugin extends AppPlugin {
   async loadTemplatesSorted() {
     const coll = await this.getTemplatesCollection();
     if (!coll) return null;
-    const records = await coll.getAllRecords();
+    const records = (await this._getRecordsCached(coll)).slice();
     records.sort((a, b) => {
       const la = this.lastUsedTs(a), lb = this.lastUsedTs(b);
       if (la !== lb) return lb - la;
@@ -842,12 +843,67 @@ class Plugin extends AppPlugin {
     // commas/pipes survive into the post-apply spawner; stripped from the body before it is written.
     out = out.replace(/\{\{task:([^}]+?)\}\}/g, (_, body) => '<!--TMPL-TASK:' + encodeURIComponent(body.trim()) + '-->');
 
+    // {{attr:Key}} / {{attr:Key:latest|avg|avgN|trend|min|max|sum|count}} -> a LIVE value pulled from the
+    // Attributes collection (the Attributes Engine plugin's index). Lets weekly-review templates auto-embed
+    // metric summaries — e.g. {{attr:Weight}}, {{attr:Energy:avg7}}, {{attr:Mood:trend}}.
+    out = await this.replaceAsync(out, /\{\{attr:([^}:]+?)(?::([^}]+?))?\}\}/g, async (_, key, mod) => {
+      try { return await this._attrValue(String(key).trim(), (mod || 'latest').trim()); } catch (e) { return ''; }
+    });
+
     // <%* js %> sandbox (async tp.* namespace)
     out = await this.replaceAsync(out, /<%\*([\s\S]*?)%>/g, async (_, code) => {
       return await this.runJsBlock(code, ctx);
     });
 
     return out;
+  }
+
+  // resolve an Attributes key to a value for the {{attr:}} token. mod: latest(default)/avg/avgN/trend/min/max/sum/count.
+  async _attrColl() {
+    if (this._attrCollCache) return this._attrCollCache;
+    try { const cols = await this.getCollectionsCached(); this._attrCollCache = cols.find(c => { try { return c.getGuid() === ATTR_COLL_GUID || c.getName() === 'Attributes'; } catch (e) { return false; } }) || null; } catch (e) {}
+    return this._attrCollCache;
+  }
+  async _attrValue(key, mod) {
+    const coll = await this._attrColl(); if (!coll) return '';
+    const recs = await this._getRecordsCached(coll);
+    const rows = [];
+    for (const r of (recs || [])) {
+      let k = ''; try { k = r.text('Key') || ''; } catch (e) {}
+      if (k !== key) continue;
+      let num = null, val = '', date = 0;
+      try { num = r.number('Number'); } catch (e) {}
+      try { val = r.text('Value') || ''; } catch (e) {}
+      try { const d = r.date('Date'); if (d) date = d.getTime(); } catch (e) {}
+      rows.push({ num: (typeof num === 'number' && isFinite(num)) ? num : null, val, date });
+    }
+    if (!rows.length) return '';
+    rows.sort((a, b) => a.date - b.date);
+    const nums = rows.map(r => r.num).filter(x => x != null);
+    const m = String(mod || 'latest').toLowerCase();
+    const fmt = (n) => (Math.round(n * 100) / 100).toString();
+    const mean = (a) => a.length ? fmt(a.reduce((s, x) => s + x, 0) / a.length) : '';
+    if (m === 'avg' || m === 'mean') return mean(nums);
+    const am = m.match(/^avg(\d+)$/); if (am) return mean(nums.slice(-parseInt(am[1], 10)));
+    if (m === 'trend') { if (nums.length < 2) return '0'; const d = nums[nums.length - 1] - nums[0]; return (d >= 0 ? '+' : '') + fmt(d); }
+    if (m === 'min') return nums.length ? fmt(Math.min(...nums)) : '';
+    if (m === 'max') return nums.length ? fmt(Math.max(...nums)) : '';
+    if (m === 'sum') return nums.length ? fmt(nums.reduce((s, x) => s + x, 0)) : '';
+    if (m === 'count') return String(rows.length);
+    const last = rows[rows.length - 1]; return last.num != null ? fmt(last.num) : last.val; // latest
+  }
+
+  // T3: one shared records snapshot per collection (TTL + event-invalidated) reused by all index builders +
+  // the {{attr:}} token, instead of each calling getAllRecords() independently on its own cache miss.
+  async _getRecordsCached(coll) {
+    if (!coll) return [];
+    let g = ''; try { g = coll.getGuid(); } catch (e) {}
+    if (!this._recSnap) this._recSnap = new Map();
+    const e = g && this._recSnap.get(g);
+    if (e && (Date.now() - e.ts) < TRIGGER_TTL_MS) return e.records;
+    let recs = []; try { recs = await coll.getAllRecords(); } catch (err) { return e ? e.records : []; }
+    if (g) this._recSnap.set(g, { ts: Date.now(), records: recs });
+    return recs;
   }
 
   // Resolve a {{date:...}} payload into a Thymer-parseable date STRING.
@@ -1766,6 +1822,7 @@ class Plugin extends AppPlugin {
       { key: 'date:', insert: '{{date:YYYY-MM-DD}}', caret: 'YYYY-MM-DD', hint: 'formatted / natural / +7 / +7@Start Date' },
       { key: 'record.', insert: '{{record.Property}}', caret: 'Property', hint: 'value from the target record' },
       { key: 'var.', insert: '{{var.Name}}', caret: 'Name', hint: 'from Variables JSON defaults' },
+      { key: 'attr:', insert: '{{attr:Key}}', caret: 'Key', hint: 'live Attributes value (:avg/:avg7/:trend/:min/:max)' },
       { key: 'ref:', insert: '{{ref:Name}}', caret: 'Name', hint: 'reference a record (segment)' },
       { key: 'tag:', insert: '{{tag:tag}}', caret: 'tag', hint: 'hashtag segment' },
       { key: 'ai::', insert: '{{ai:: instruction}}', caret: 'instruction', hint: 'inline AI text (needs /llm)' },
@@ -2253,7 +2310,7 @@ class Plugin extends AppPlugin {
       try {
         const cols = await this.getCollectionsCached();
         const coll = cols.find(c => c && c.getName && c.getName() === TEMPLATES_COLL) || null;
-        if (coll) { for (const r of await coll.getAllRecords()) { const pat = this.titlePatternOf(r); if (!pat) continue; const tc = this._templatePinnedCollection(r); if (tc && !map[tc]) map[tc] = pat; } }
+        if (coll) { for (const r of await this._getRecordsCached(coll)) { const pat = this.titlePatternOf(r); if (!pat) continue; const tc = this._templatePinnedCollection(r); if (tc && !map[tc]) map[tc] = pat; } }
       } catch (e) {}
       st.titlePatIndex = { ts: Date.now(), map };
     }
@@ -2349,7 +2406,7 @@ class Plugin extends AppPlugin {
       const cols = await this.getCollectionsCached();
       const coll = cols.find(c => c && c.getName && c.getName() === TEMPLATES_COLL) || null;
       if (coll) {
-        for (const r of await coll.getAllRecords()) {
+        for (const r of await this._getRecordsCached(coll)) {
           if (!this._autoTitleOn(r)) continue;
           const pat = this.titlePatternOf(r); if (!pat) continue;
           const tc = this._templatePinnedCollection(r); if (!tc) continue;
@@ -2430,7 +2487,7 @@ class Plugin extends AppPlugin {
         const cols = await this.getCollectionsCached();
         for (const cn of Object.keys(idx.body)) {
           const col = cols.find(c => c && c.getName && c.getName() === cn); if (!col) continue;
-          try { for (const r of await col.getAllRecords()) { const g = r.guid || (r.getGuid && r.getGuid()); if (g) map.set(g, { name: cn, pat: idx.body[cn] }); } } catch (e) {}
+          try { for (const r of await this._getRecordsCached(col)) { const g = r.guid || (r.getGuid && r.getGuid()); if (g) map.set(g, { name: cn, pat: idx.body[cn] }); } } catch (e) {}
         }
         st.bodyMembers = { ts: Date.now(), map };
       }
@@ -2847,6 +2904,7 @@ class Plugin extends AppPlugin {
   async onRecordCreated(ev) {
     try {
       if (!ev) return;
+      try { if (ev.collectionGuid && this._recSnap) this._recSnap.delete(ev.collectionGuid); } catch (e) {} // T3: invalidate snapshot for the changed collection
       // Only react to LOCAL creations by default — a '*' listener fires on every connected client. TS-7: a
       // REMOTE creation (MCP agent / cron) auto-applies only when the new record carries an explicit #auto tag.
       const remote = ev.source && ev.source.isLocal === false;
@@ -2986,7 +3044,7 @@ class Plugin extends AppPlugin {
       const cols = await this.getCollectionsCached();
       const coll = cols.find(c => c && c.getName && c.getName() === TEMPLATES_COLL) || null;
       if (coll) {
-        const records = await coll.getAllRecords();
+        const records = await this._getRecordsCached(coll);
         for (const r of records) {
           const sched = this.schedOf(r);
           if (sched) { const spec = this.parseSchedule(sched); if (spec) idx.schedules.push({ tmpl: r, spec }); }
@@ -3205,6 +3263,7 @@ class Plugin extends AppPlugin {
   // --- event handlers ---
   async onRecordUpdated(ev) {
     try {
+      try { if (ev && ev.collectionGuid && this._recSnap) this._recSnap.delete(ev.collectionGuid); } catch (e) {} // T3: invalidate snapshot for the changed collection
       if (!ev) return; const recGuid = ev.recordGuid, collGuid = ev.collectionGuid; if (!recGuid || !collGuid) return;
       if (this._state.applying.has(recGuid)) return;                    // our own write → ignore
       const collName = await this.collectionNameByGuid(collGuid); if (!collName) return;
