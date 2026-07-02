@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.41.0 loaded — 10X Phase B: (1) IDEMPOTENT MERGE RE-APPLY — apply with mode:merge adds ONLY missing sections (top-level-heading diff) and fills ONLY empty properties (never renames/overwrites); directives re-collected from the filtered body so a re-apply never respawns tasks/relations. (2) TRIGGER CHAINS — Variables JSON {\"then\":\"Next Template\"} merge-applies the next template onto the record after this one completes (depth-capped 3, self-chain ignored). (3) VERSION MIGRATION — command \"Templater: Re-scaffold outdated records…\" reads the audit log for records born from an older template Version and merge-applies the current one (cap 25, confirm-first). ——— v2.40.0 10X Phase A: CONDITIONAL SECTIONS — {{if:<cond>}} … {{else}} … {{endif}} renders a branch by a typed property (Type=Meeting / Status!=Done) or a LIVE Attributes value ({{if:attr:Recovery>66}}deep-work{{else}}admin{{endif}} — the WHOOP-aware daily note). Unknown → false; keep {{prompt:}} outside branches (prompt collection precedes render). ——— v2.39.0 ORIGINAL-TEMPLATER PARITY (gap analysis vs SilentVoid13/Templater): (1) <% expr %> INTERPOLATION — plain-expression form now renders (<% tp.date.now(\"YYYY-MM-DD\") %>, <% tp.file.title %>; <%- -%>/<%_ _%>/<%+ accepted), so Obsidian templates paste in portably; (2) tp.web.request(url)/daily_quote()/random_picture(size) — plugin-side fetch surfaced to authors; (3) tp.system.multi_suggester is now a REAL checkbox multi-select modal (was a single-select stub); (4) tp.hooks.on_all_templates_executed(cb) fires after the full apply pipeline; (5) a palette command PER template (Templater: Apply \"Daily Note\") — the per-template-hotkey analog, auto-refreshed when Templates change. Full matrix in GAP_ANALYSIS.md. ——— v2.38.0 EDITOR BODY-PRECEDENCE FIX: the Edit dialog loaded the NATIVE outline body whenever one existed, but apply uses the Template Content TEXT body first — so a template with both (e.g. Daily Note: full template in Template Content + a stale 2-line outline fragment) showed only the fragment, the real body was uneditable, and SAVING would have rewritten Template Content to frontmatter-only (destroying the template). The editor now mirrors apply (text body first, native only when text is empty) and warns when both stores are populated (saving as Text removes the stale outline). ——— v2.37.0 editor: "Fills a new record in" now offers "— none (ask on apply) —" (unpinned template — apply-time picker chooses the collection; auto-apply disabled when none); "Templater: New template…" command (+ "＋ New template…" in the edit picker) creates a template via this dialog; fixed the auto-apply checkbox layout (was detached from its label) + clearer wording. FULL-CONTROL EDITOR: "Templater: Edit template…" now edits the BODY too (markdown textarea + Native-outline/Text storage toggle — Native is editable here AND in the doc), the raw Variables (JSON), plus property rows/Auto-apply/Auto Title/Title Pattern. AUTOCOMPLETE (Datacore-style) in every value field + body: type {{ for the token menu (with hints), {{record. for fields, dc: @ for collections. In-dialog Template-language reference + a fully rewritten README documenting every token. Earlier: the FORM editor writes the --- frontmatter + settings back to the record — no hand-editing the cramped text field. HEADING NESTING: a heading now PARENTS the lines beneath it (so "- Key point" under "## Notes" is a real child); opt out per template with Variables JSON {"nest":"flat"}. NATIVE-EDITOR AUTHORING: write a template\'s BODY as normal nested bullets/headings in the template record itself (WYSIWYG, drag-to-indent) and Templater reads it — frontmatter stays in the short Template Content --- block; used only when that text body is empty, so existing markdown templates are unchanged. PER-COLLECTION AUTO-APPLY: set a template\'s "Trigger On" = record.created:<Collection> and a NEW record in that collection auto-scaffolds (silent, no prompts; dangling-separator title junk now stripped so interactive templates auto-apply cleanly). Local UI creates fire automatically; remote/MCP creates need a #auto tag. +SPINE __templater.applyTemplateByName(name,{prompts,mode,collection}) runs the FULL apply pipeline headless (for the Quick Add plugin). AUTO-TITLE: type the body, the title builds itself. Per-collection via the template\'s "Auto Title" (Off/On) + "Title Pattern"; strategy inferred from the pattern tokens. {{firstline}} → titles from the first body line on every edit (debounced ~1.2s) — e.g. Notes. Property patterns ({{Type}} · {{Attendees}}) → auto-title on property edits. SET-ONCE-UNTIL-MANUAL: auto fills only while the title is blank/Untitled/auto-owned; the moment you type your own title it\'s locked (never fights you). On-demand: command "Templater: AI title this note" → a 4-6 word AI summary title (needs the /llm proxy on :8787). Manual: "Templater: Rename from properties" still works for any collection. Spine: __templater.aiTitleActive/autoTitleByGuid(guid,collName)/composeTitle. ——— RENAME FROM PROPERTIES + TRIGGERS ENGINE (schedule/event/condition; Daily Note @ 06:00 → journal:today) unchanged. Plus <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.42.0 loaded — 10X Phase C: (1) RELATE CASCADE — {{relate:Field=Name :: create=Collection :: apply=Template}} creates a missing relation target and merge-applies a template onto it (one apply scaffolds a linked subgraph). (2) SMART CAPTURE — command \"Templater: Smart capture…\" (+ spine __templater.smartCapture(text)): raw text in, the LLM picks the best template AND pre-fills its prompts; manual-picker fallback when the /llm proxy is down. (3) The TP-19 typed schema FORM is now a checkbox in the Edit dialog (was a hand-edited Variables JSON {\"form\":true} opt-in). ——— v2.41.0 10X Phase B: (1) IDEMPOTENT MERGE RE-APPLY — apply with mode:merge adds ONLY missing sections (top-level-heading diff) and fills ONLY empty properties (never renames/overwrites); directives re-collected from the filtered body so a re-apply never respawns tasks/relations. (2) TRIGGER CHAINS — Variables JSON {\"then\":\"Next Template\"} merge-applies the next template onto the record after this one completes (depth-capped 3, self-chain ignored). (3) VERSION MIGRATION — command \"Templater: Re-scaffold outdated records…\" reads the audit log for records born from an older template Version and merge-applies the current one (cap 25, confirm-first). ——— v2.40.0 10X Phase A: CONDITIONAL SECTIONS — {{if:<cond>}} … {{else}} … {{endif}} renders a branch by a typed property (Type=Meeting / Status!=Done) or a LIVE Attributes value ({{if:attr:Recovery>66}}deep-work{{else}}admin{{endif}} — the WHOOP-aware daily note). Unknown → false; keep {{prompt:}} outside branches (prompt collection precedes render). ——— v2.39.0 ORIGINAL-TEMPLATER PARITY (gap analysis vs SilentVoid13/Templater): (1) <% expr %> INTERPOLATION — plain-expression form now renders (<% tp.date.now(\"YYYY-MM-DD\") %>, <% tp.file.title %>; <%- -%>/<%_ _%>/<%+ accepted), so Obsidian templates paste in portably; (2) tp.web.request(url)/daily_quote()/random_picture(size) — plugin-side fetch surfaced to authors; (3) tp.system.multi_suggester is now a REAL checkbox multi-select modal (was a single-select stub); (4) tp.hooks.on_all_templates_executed(cb) fires after the full apply pipeline; (5) a palette command PER template (Templater: Apply \"Daily Note\") — the per-template-hotkey analog, auto-refreshed when Templates change. Full matrix in GAP_ANALYSIS.md. ——— v2.38.0 EDITOR BODY-PRECEDENCE FIX: the Edit dialog loaded the NATIVE outline body whenever one existed, but apply uses the Template Content TEXT body first — so a template with both (e.g. Daily Note: full template in Template Content + a stale 2-line outline fragment) showed only the fragment, the real body was uneditable, and SAVING would have rewritten Template Content to frontmatter-only (destroying the template). The editor now mirrors apply (text body first, native only when text is empty) and warns when both stores are populated (saving as Text removes the stale outline). ——— v2.37.0 editor: "Fills a new record in" now offers "— none (ask on apply) —" (unpinned template — apply-time picker chooses the collection; auto-apply disabled when none); "Templater: New template…" command (+ "＋ New template…" in the edit picker) creates a template via this dialog; fixed the auto-apply checkbox layout (was detached from its label) + clearer wording. FULL-CONTROL EDITOR: "Templater: Edit template…" now edits the BODY too (markdown textarea + Native-outline/Text storage toggle — Native is editable here AND in the doc), the raw Variables (JSON), plus property rows/Auto-apply/Auto Title/Title Pattern. AUTOCOMPLETE (Datacore-style) in every value field + body: type {{ for the token menu (with hints), {{record. for fields, dc: @ for collections. In-dialog Template-language reference + a fully rewritten README documenting every token. Earlier: the FORM editor writes the --- frontmatter + settings back to the record — no hand-editing the cramped text field. HEADING NESTING: a heading now PARENTS the lines beneath it (so "- Key point" under "## Notes" is a real child); opt out per template with Variables JSON {"nest":"flat"}. NATIVE-EDITOR AUTHORING: write a template\'s BODY as normal nested bullets/headings in the template record itself (WYSIWYG, drag-to-indent) and Templater reads it — frontmatter stays in the short Template Content --- block; used only when that text body is empty, so existing markdown templates are unchanged. PER-COLLECTION AUTO-APPLY: set a template\'s "Trigger On" = record.created:<Collection> and a NEW record in that collection auto-scaffolds (silent, no prompts; dangling-separator title junk now stripped so interactive templates auto-apply cleanly). Local UI creates fire automatically; remote/MCP creates need a #auto tag. +SPINE __templater.applyTemplateByName(name,{prompts,mode,collection}) runs the FULL apply pipeline headless (for the Quick Add plugin). AUTO-TITLE: type the body, the title builds itself. Per-collection via the template\'s "Auto Title" (Off/On) + "Title Pattern"; strategy inferred from the pattern tokens. {{firstline}} → titles from the first body line on every edit (debounced ~1.2s) — e.g. Notes. Property patterns ({{Type}} · {{Attendees}}) → auto-title on property edits. SET-ONCE-UNTIL-MANUAL: auto fills only while the title is blank/Untitled/auto-owned; the moment you type your own title it\'s locked (never fights you). On-demand: command "Templater: AI title this note" → a 4-6 word AI summary title (needs the /llm proxy on :8787). Manual: "Templater: Rename from properties" still works for any collection. Spine: __templater.aiTitleActive/autoTitleByGuid(guid,collName)/composeTitle. ——— RENAME FROM PROPERTIES + TRIGGERS ENGINE (schedule/event/condition; Daily Note @ 06:00 → journal:today) unchanged. Plus <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -189,6 +189,13 @@ class Plugin extends AppPlugin {
     try {
       const mcmd = this.ui.addCommandPaletteCommand({ label: "Templater: Re-scaffold outdated records…", icon: "ti-git-branch", onSelected: () => plugin.reScaffoldOutdated() });
       if (mcmd && mcmd.remove) this._state.disposers.push(() => { try { mcmd.remove(); } catch (e) {} });
+    } catch (e) {}
+
+    // 10X-#3: LLM capture router — raw text in, the right template picked + its prompts pre-filled.
+    try {
+      const scmd = this.ui.addCommandPaletteCommand({ label: "Templater: Smart capture…", icon: "ti-wand", onSelected: () => plugin.smartCapture() });
+      if (scmd && scmd.remove) this._state.disposers.push(() => { try { scmd.remove(); } catch (e) {} });
+      this._state.smartCapture = (text) => plugin.smartCapture(text);
     } catch (e) {}
 
     // Programmatic render seam (verification + cross-plugin use): render a template string with
@@ -891,8 +898,22 @@ class Plugin extends AppPlugin {
 
     // TS-3: {{relate:Field=Name}} -> a directive that sets a typed record-RELATION property after create (the new
     // record drops straight into the Plexus Brain graph). Resolved to the target GUID here.
-    out = await this.replaceAsync(out, /\{\{relate:([^=}]+)=([^}]+)\}\}/g, async (_, field, nameOrGuid) => {
-      const guid = await this.resolveRefGuid(nameOrGuid.trim());
+    // 10X-#4 CASCADE extensions: {{relate:Field=Name :: create=Collection :: apply=Template}} —
+    // creates the target when missing, then (optionally) merge-applies a template onto it, so one
+    // apply can scaffold a whole linked subgraph. apply is depth-capped via __chainDepth.
+    out = await this.replaceAsync(out, /\{\{relate:([^=}]+)=([^}]+)\}\}/g, async (_, field, spec) => {
+      const parts = String(spec).split(/\s*::\s*/);
+      const nameOrGuid = parts[0].trim();
+      let createColl = null, applyTmpl = null;
+      for (const p of parts.slice(1)) { const m = p.match(/^(create|apply)\s*=\s*(.+)$/i); if (m) { if (/^create$/i.test(m[1])) createColl = m[2].trim(); else applyTmpl = m[2].trim(); } }
+      let guid = await this.resolveRefGuid(nameOrGuid);
+      if (!guid && createColl) {
+        try { const coll = await this.collectionByName(createColl); if (coll) { const ng = coll.createRecord(nameOrGuid); if (ng && await this.pollRecord(ng)) guid = ng; } } catch (e) { console.warn('[Templater] relate create failed', e); }
+      }
+      if (guid && applyTmpl) {
+        const g2 = guid, t2 = applyTmpl;
+        setTimeout(() => { try { this._state.applyTemplateByName(t2, { mode: 'merge', recordGuid: g2, prompts: {}, __chainDepth: 2 }).then(r => { if (r && r.error) console.warn('[Templater] relate apply →', t2, r.error); }); } catch (e) { console.warn('[Templater] relate apply failed', e); } }, 700);
+      }
       return guid ? `<!--PLEXUS-RELATE:${field.trim()}=${guid}-->` : '';
     });
 
@@ -1887,6 +1908,12 @@ class Plugin extends AppPlugin {
     const autoChk = document.createElement('input'); autoChk.type = 'checkbox'; autoChk.checked = autoApply; autoChk.id = 'tmpl-autoapply'; autoChk.disabled = !targetColl;
     const autoLbl = document.createElement('label'); autoLbl.setAttribute('for', 'tmpl-autoapply'); autoLbl.textContent = 'Auto-apply — scaffold this template automatically whenever a new record is created in the target collection (no prompts). Needs a target collection above.';
     autoWrap.appendChild(autoChk); autoWrap.appendChild(autoLbl); modal.appendChild(autoWrap);
+    // 10X-#1: surface the TP-19 typed schema form (was a hand-edited Variables JSON {"form":true} opt-in)
+    const formWrap = document.createElement('div'); formWrap.className = 'tmpl-check';
+    const formChk = document.createElement('input'); formChk.type = 'checkbox'; formChk.id = 'tmpl-schemaform';
+    try { formChk.checked = !!JSON.parse(rawVars || '{}').form; } catch (e) { formChk.checked = false; }
+    const formLbl = document.createElement('label'); formLbl.setAttribute('for', 'tmpl-schemaform'); formLbl.textContent = 'Typed schema FORM on apply — ONE form built from the collection schema (date pickers / choice dropdowns / record pickers / number inputs + AI-fill) instead of chained prompts. Needs a target collection.';
+    formWrap.appendChild(formChk); formWrap.appendChild(formLbl); modal.appendChild(formWrap);
     const atWrap = document.createElement('div'); atWrap.className = 'tmpl-field'; const atL = document.createElement('label'); atL.textContent = 'Auto Title'; atWrap.appendChild(atL);
     const atSel = document.createElement('select'); ['Off', 'On'].forEach(o => { const op = document.createElement('option'); op.value = o; op.textContent = o; if (o === autoTitle) op.selected = true; atSel.appendChild(op); }); atWrap.appendChild(atSel); modal.appendChild(atWrap);
     const tpIn = mkText('Title Pattern (optional, e.g. {{firstline}} or {{Type}} · {{Lead}})', titlePattern);
@@ -1946,6 +1973,7 @@ class Plugin extends AppPlugin {
         try { const p = template.prop(F_AUTOTITLE); if (p && p.setChoice) p.setChoice(atSel.value); } catch (e) {}
         try { const p = template.prop(F_TRIGGERON); if (p && p.set) p.set(autoChk.checked && tcoll ? ('record.created:' + tcoll) : ''); } catch (e) {}
         // Variables JSON (validated above) — force collection = the dropdown, then write verbatim
+        try { if (formChk.checked) vo.form = true; else delete vo.form; } catch (e) {}   // 10X-#1
         try { if (tcoll) vo.collection = tcoll; else delete vo.collection; const vp = template.prop(F_VARS); if (vp && vp.set) vp.set(JSON.stringify(vo)); } catch (e) {}
         close();
         this.toast('Templater', 'Saved "' + this.tName(template) + '"');
@@ -2160,6 +2188,38 @@ class Plugin extends AppPlugin {
   // ========================================================================
   // Apply — title + frontmatter -> properties + nested body line items + audit
   // ========================================================================
+
+  // 10X-#3: Smart capture — type/paste a raw thought; the LLM picks the best template AND fills
+  // its prompts from the text; graceful fallback to a manual picker when the /llm proxy is down.
+  async smartCapture(presetText) {
+    try {
+      const text = (presetText && String(presetText).trim()) || await this.asyncPrompt('Smart capture — describe it', '');
+      if (!text || !String(text).trim()) return;
+      const records = await this.loadTemplatesSorted(); if (!records || !records.length) { this.toast('Templater', 'No templates.'); return; }
+      const metas = [];
+      for (const r of records.slice(0, 30)) {
+        const nm = this.tName(r); if (!nm) continue;
+        let content = ''; try { content = await this.assembleTemplateSource(r) || ''; } catch (e) {}
+        const prompts = []; const re = /\{\{prompt(?:\.\w+)?:([^}]+?)\}\}/g; let m;
+        while ((m = re.exec(content)) !== null) { const lbl = m[1].split(/\s*::\s*/)[0].split(/\s*\?\?\s*/)[0].trim(); if (lbl && !prompts.includes(lbl)) prompts.push(lbl); }
+        let purpose = ''; try { purpose = (r.text && r.text('Purpose')) || ''; } catch (e) {}
+        metas.push({ name: nm, purpose: String(purpose || '').slice(0, 140), prompts });
+      }
+      const req = 'Pick the SINGLE best template for this capture and fill its prompts from the text (leave a prompt out if the text doesn\'t answer it). Templates:\n' +
+        metas.map(t => '- ' + t.name + (t.purpose ? ' — ' + t.purpose : '') + (t.prompts.length ? ' (prompts: ' + t.prompts.join(', ') + ')' : '')).join('\n') +
+        '\n\nCapture:\n"""\n' + String(text).slice(0, 4000) + '\n"""\n\nReply ONLY JSON: {"template":"Name","prompts":{"Label":"value"}}';
+      let pick = null;
+      try { const r = await this._llm(req, false); pick = (r && r.text) ? this._parseJsonLoose(r.text) : null; } catch (e) {}
+      if (pick && pick.template && metas.find(t => t.name === pick.template)) {
+        this.toast('Templater', 'Smart capture → "' + pick.template + '"');
+        const res = await this._state.applyTemplateByName(pick.template, { prompts: (pick.prompts && typeof pick.prompts === 'object') ? pick.prompts : {} });
+        if (res && res.error) this.toast('Templater', 'Apply failed: ' + res.error);
+        return;
+      }
+      const idx = await this.asyncSuggester('LLM unavailable — pick a template for this capture', metas.map(t => t.name));
+      if (idx >= 0) await this._state.applyTemplateByName(metas[idx].name, {});
+    } catch (e) { console.warn('[Templater] smartCapture', e); this.toast('Templater', 'Smart capture failed — see console.'); }
+  }
 
   // 10X-#9: find audit rows for a chosen template recorded with an OLDER version and merge-apply
   // the current version onto those records (adds missing sections / fills empty props only; prompts
