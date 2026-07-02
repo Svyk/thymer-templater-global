@@ -160,3 +160,48 @@ For cross-plugin use (e.g. Quick Add): `render(content, prompts)`, `renderTempla
 ## Data model
 
 Reads the **Templates** collection; writes audit rows to a template-log collection if present. Creates no collections. See `CONSTANTS.md` for GUIDs.
+
+## 10x features (v2.40–v2.43)
+
+**Conditional sections** — `{{if:<cond>}} … {{else}} … {{endif}}` (non-nested). Conditions:
+`Field=Value` / `Field!=Value` (target record's typed property) or `attr:Key>N|<|>=|<=|=|!=`
+(live Attributes value). WHOOP-aware daily note:
+`{{if:attr:Recovery>66}}## Deep work…{{else}}## Admin…{{endif}}`.
+Keep `{{prompt:}}` tokens outside branches (prompts are collected before render).
+
+**Idempotent merge re-apply** — apply with mode `merge` (or headless
+`__templater.applyTemplateByName(name, {mode:'merge', recordGuid})`) adds ONLY sections whose
+top-level heading is missing and fills ONLY empty properties; task/relate/banner directives
+re-collect from the filtered body so a re-apply never duplicates or respawns.
+
+**Trigger chains** — Variables JSON `{"then": "Next Template"}` merge-applies the next template
+onto the same record after this one completes (depth-capped at 3; self-chains ignored).
+
+**Version migration** — command `Templater: Re-scaffold outdated records…` reads the audit log
+("Template Log") for records born from an older template Version and merge-applies the current
+one (cap 25 per run, confirm-first; prompts render empty — structural migration).
+
+**Relate cascade** — `{{relate:Field=Name :: create=Collection :: apply=Template}}` creates the
+relation target when missing and merge-applies a template onto it: one apply scaffolds a whole
+linked subgraph.
+
+**Smart capture** — command `Templater: Smart capture…` (spine: `__templater.smartCapture(text)`):
+raw text in, the LLM picks the best template AND pre-fills its prompts; manual picker fallback
+when the /llm proxy is down.
+
+**Typed schema form** — the TP-19 one-form apply (date pickers / choice dropdowns / record
+pickers / number inputs + AI-fill) is now a checkbox in the Edit dialog (was Variables JSON
+`{"form": true}`).
+
+**Insert snippets** — the Edit dialog body has an `Insert:` row of one-click starters
+(dc: table/list, `{{attr}}`, `{{if}}`, `{{task}}`, cascade `{{relate+}}`).
+
+**AI template synthesis** — command `Templater: New template from example…`: pick any record;
+the LLM turns its props/body into a reusable template (instance values →
+`{{prompt:}}`/`{{prompt.choice::}}`/`{{date:}}`; structure and `dc:`/`{{attr:}}` lines kept
+verbatim); a draft Templates record is created and the editor opens on it.
+
+**Original-Templater parity (v2.39)** — `<% expr %>` interpolation (Obsidian templates paste in
+portably), `tp.web.request/daily_quote/random_picture`, real multi-select
+`tp.system.multi_suggester`, `tp.hooks.on_all_templates_executed`, and a palette command per
+template. Full gap matrix: GAP_ANALYSIS.md.
