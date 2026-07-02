@@ -5,7 +5,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.38.0 loaded — EDITOR BODY-PRECEDENCE FIX: the Edit dialog loaded the NATIVE outline body whenever one existed, but apply uses the Template Content TEXT body first — so a template with both (e.g. Daily Note: full template in Template Content + a stale 2-line outline fragment) showed only the fragment, the real body was uneditable, and SAVING would have rewritten Template Content to frontmatter-only (destroying the template). The editor now mirrors apply (text body first, native only when text is empty) and warns when both stores are populated (saving as Text removes the stale outline). ——— v2.37.0 editor: "Fills a new record in" now offers "— none (ask on apply) —" (unpinned template — apply-time picker chooses the collection; auto-apply disabled when none); "Templater: New template…" command (+ "＋ New template…" in the edit picker) creates a template via this dialog; fixed the auto-apply checkbox layout (was detached from its label) + clearer wording. FULL-CONTROL EDITOR: "Templater: Edit template…" now edits the BODY too (markdown textarea + Native-outline/Text storage toggle — Native is editable here AND in the doc), the raw Variables (JSON), plus property rows/Auto-apply/Auto Title/Title Pattern. AUTOCOMPLETE (Datacore-style) in every value field + body: type {{ for the token menu (with hints), {{record. for fields, dc: @ for collections. In-dialog Template-language reference + a fully rewritten README documenting every token. Earlier: the FORM editor writes the --- frontmatter + settings back to the record — no hand-editing the cramped text field. HEADING NESTING: a heading now PARENTS the lines beneath it (so "- Key point" under "## Notes" is a real child); opt out per template with Variables JSON {"nest":"flat"}. NATIVE-EDITOR AUTHORING: write a template\'s BODY as normal nested bullets/headings in the template record itself (WYSIWYG, drag-to-indent) and Templater reads it — frontmatter stays in the short Template Content --- block; used only when that text body is empty, so existing markdown templates are unchanged. PER-COLLECTION AUTO-APPLY: set a template\'s "Trigger On" = record.created:<Collection> and a NEW record in that collection auto-scaffolds (silent, no prompts; dangling-separator title junk now stripped so interactive templates auto-apply cleanly). Local UI creates fire automatically; remote/MCP creates need a #auto tag. +SPINE __templater.applyTemplateByName(name,{prompts,mode,collection}) runs the FULL apply pipeline headless (for the Quick Add plugin). AUTO-TITLE: type the body, the title builds itself. Per-collection via the template\'s "Auto Title" (Off/On) + "Title Pattern"; strategy inferred from the pattern tokens. {{firstline}} → titles from the first body line on every edit (debounced ~1.2s) — e.g. Notes. Property patterns ({{Type}} · {{Attendees}}) → auto-title on property edits. SET-ONCE-UNTIL-MANUAL: auto fills only while the title is blank/Untitled/auto-owned; the moment you type your own title it\'s locked (never fights you). On-demand: command "Templater: AI title this note" → a 4-6 word AI summary title (needs the /llm proxy on :8787). Manual: "Templater: Rename from properties" still works for any collection. Spine: __templater.aiTitleActive/autoTitleByGuid(guid,collName)/composeTitle. ——— RENAME FROM PROPERTIES + TRIGGERS ENGINE (schedule/event/condition; Daily Note @ 06:00 → journal:today) unchanged. Plus <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.39.0 loaded — ORIGINAL-TEMPLATER PARITY (gap analysis vs SilentVoid13/Templater): (1) <% expr %> INTERPOLATION — plain-expression form now renders (<% tp.date.now(\"YYYY-MM-DD\") %>, <% tp.file.title %>; <%- -%>/<%_ _%>/<%+ accepted), so Obsidian templates paste in portably; (2) tp.web.request(url)/daily_quote()/random_picture(size) — plugin-side fetch surfaced to authors; (3) tp.system.multi_suggester is now a REAL checkbox multi-select modal (was a single-select stub); (4) tp.hooks.on_all_templates_executed(cb) fires after the full apply pipeline; (5) a palette command PER template (Templater: Apply \"Daily Note\") — the per-template-hotkey analog, auto-refreshed when Templates change. Full matrix in GAP_ANALYSIS.md. ——— v2.38.0 EDITOR BODY-PRECEDENCE FIX: the Edit dialog loaded the NATIVE outline body whenever one existed, but apply uses the Template Content TEXT body first — so a template with both (e.g. Daily Note: full template in Template Content + a stale 2-line outline fragment) showed only the fragment, the real body was uneditable, and SAVING would have rewritten Template Content to frontmatter-only (destroying the template). The editor now mirrors apply (text body first, native only when text is empty) and warns when both stores are populated (saving as Text removes the stale outline). ——— v2.37.0 editor: "Fills a new record in" now offers "— none (ask on apply) —" (unpinned template — apply-time picker chooses the collection; auto-apply disabled when none); "Templater: New template…" command (+ "＋ New template…" in the edit picker) creates a template via this dialog; fixed the auto-apply checkbox layout (was detached from its label) + clearer wording. FULL-CONTROL EDITOR: "Templater: Edit template…" now edits the BODY too (markdown textarea + Native-outline/Text storage toggle — Native is editable here AND in the doc), the raw Variables (JSON), plus property rows/Auto-apply/Auto Title/Title Pattern. AUTOCOMPLETE (Datacore-style) in every value field + body: type {{ for the token menu (with hints), {{record. for fields, dc: @ for collections. In-dialog Template-language reference + a fully rewritten README documenting every token. Earlier: the FORM editor writes the --- frontmatter + settings back to the record — no hand-editing the cramped text field. HEADING NESTING: a heading now PARENTS the lines beneath it (so "- Key point" under "## Notes" is a real child); opt out per template with Variables JSON {"nest":"flat"}. NATIVE-EDITOR AUTHORING: write a template\'s BODY as normal nested bullets/headings in the template record itself (WYSIWYG, drag-to-indent) and Templater reads it — frontmatter stays in the short Template Content --- block; used only when that text body is empty, so existing markdown templates are unchanged. PER-COLLECTION AUTO-APPLY: set a template\'s "Trigger On" = record.created:<Collection> and a NEW record in that collection auto-scaffolds (silent, no prompts; dangling-separator title junk now stripped so interactive templates auto-apply cleanly). Local UI creates fire automatically; remote/MCP creates need a #auto tag. +SPINE __templater.applyTemplateByName(name,{prompts,mode,collection}) runs the FULL apply pipeline headless (for the Quick Add plugin). AUTO-TITLE: type the body, the title builds itself. Per-collection via the template\'s "Auto Title" (Off/On) + "Title Pattern"; strategy inferred from the pattern tokens. {{firstline}} → titles from the first body line on every edit (debounced ~1.2s) — e.g. Notes. Property patterns ({{Type}} · {{Attendees}}) → auto-title on property edits. SET-ONCE-UNTIL-MANUAL: auto fills only while the title is blank/Untitled/auto-owned; the moment you type your own title it\'s locked (never fights you). On-demand: command "Templater: AI title this note" → a 4-6 word AI summary title (needs the /llm proxy on :8787). Manual: "Templater: Rename from properties" still works for any collection. Spine: __templater.aiTitleActive/autoTitleByGuid(guid,collName)/composeTitle. ——— RENAME FROM PROPERTIES + TRIGGERS ENGINE (schedule/event/condition; Daily Note @ 06:00 → journal:today) unchanged. Plus <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
 
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
@@ -168,6 +168,21 @@ class Plugin extends AppPlugin {
       const ncmd = this.ui.addCommandPaletteCommand({ label: "Templater: New template…", icon: "ti-plus", onSelected: () => plugin.newTemplateCommand() });
       if (ncmd && ncmd.remove) this._state.disposers.push(() => { try { ncmd.remove(); } catch (e) {} });
     } catch (e) { console.warn('[Templater] new-template cmd add failed:', e); }
+
+    // GAP-5: a palette command PER template ("Templater: Apply 'Daily Note'") — the original's
+    // per-template-hotkey analog (the palette is Thymer's hotkey surface). Refreshed (debounced)
+    // when the Templates collection changes; all handles disposed on unload.
+    this._registerTemplateCommands();
+    this.getTemplatesCollection().then((tcol) => {
+      try {
+        if (!tcol || !this.events || !this.events.on) return;
+        for (const ev of ['record.created', 'record.updated']) {
+          const id = this.events.on(ev, () => { clearTimeout(this._tmplCmdT); this._tmplCmdT = setTimeout(() => this._registerTemplateCommands(), 1500); }, { collection: tcol.getGuid() });
+          this._state.disposers.push(() => { try { this.events.off(id); } catch (e) {} });
+        }
+        this._state.disposers.push(() => { try { for (const d of (this._tmplCmds || [])) d(); } catch (e) {} });
+      } catch (e) {}
+    }).catch(() => {});
 
     // Programmatic render seam (verification + cross-plugin use): render a template string with
     // pre-supplied prompt answers, no UI. Returns the rendered {title, properties, body} string.
@@ -860,6 +875,15 @@ class Plugin extends AppPlugin {
       return await this.runJsBlock(code, ctx);
     });
 
+    // GAP-1 (original-Templater parity): <% expr %> INTERPOLATION — a plain expression whose value
+    // is inserted, e.g. `<% tp.date.now("YYYY-MM-DD") %>` or `<% tp.file.title %>`. Runs AFTER the
+    // <%* pass so only non-star forms remain; accepts and strips the original's whitespace-control
+    // markers (<%- … -%>, <%_ … _%>) and the <%+ dynamic marker (evaluated once — Thymer bodies are
+    // live documents, so "dynamic" re-render doesn't apply). runJsBlock auto-wraps bare expressions.
+    out = await this.replaceAsync(out, /<%(?!\*)[-_+]?([\s\S]*?)[-_]?%>/g, async (_, code) => {
+      return await this.runJsBlock(code, ctx);
+    });
+
     return out;
   }
 
@@ -1125,14 +1149,28 @@ class Plugin extends AppPlugin {
           const idx = await plugin.asyncSuggester("Choose", opts.map(String));
           return idx >= 0 ? (items ? items[idx] : opts[idx]) : null;
         },
-        // Single-select under the hood; returns an array for tp.* API compatibility.
-        // (Real multi-select not implemented — documented limitation.)
+        // GAP-3: REAL multi-select (checkbox modal) — was a single-select stub returning [one].
         multi_suggester: async (items, labels) => {
           const opts = (labels || items) || [];
-          const idx = await plugin.asyncSuggester("Choose (one)", opts.map(String));
-          return idx >= 0 ? [items ? items[idx] : opts[idx]] : [];
+          const idxs = await plugin.asyncMultiSuggester("Choose (multi)", opts.map(String));
+          return idxs.map(i => (items ? items[i] : opts[i]));
         },
         clipboard: async () => { try { return await navigator.clipboard.readText(); } catch (e) { return ""; } },
+      },
+      // GAP-2: tp.web.* — plugin-side fetch surfaced to template authors (user code can't call fetch
+      // directly; these run in the plugin closure). request() returns parsed JSON when the response
+      // is JSON, else text.
+      web: {
+        request: async (url, opts) => { try { const r = await fetch(String(url), (opts && typeof opts === 'object') ? opts : undefined); const ct = (r.headers.get('content-type') || ''); return ct.includes('application/json') ? await r.json() : await r.text(); } catch (e) { return "[web error: " + (e && e.message || e) + "]"; } },
+        daily_quote: async () => { try { const r = await fetch('https://api.quotable.io/random'); const j = await r.json(); return '> ' + j.content + '\n> — ' + j.author; } catch (e) { return ''; } },
+        random_picture: async (size) => { const s = String(size || '1600x900').split('x'); return 'https://picsum.photos/' + (parseInt(s[0], 10) || 1600) + '/' + (parseInt(s[1], 10) || 900); },
+      },
+      // GAP-4: tp.hooks.on_all_templates_executed(cb) — cb runs once, after the whole apply pipeline
+      // (properties + body + tasks + relations) finishes. Queued on the PLUGIN (render ctx doesn't
+      // reach applyTemplate); drained there. Render-only paths without an apply just leave the
+      // queue for the next apply — same single-shot semantics as the original.
+      hooks: {
+        on_all_templates_executed: (cb) => { try { if (typeof cb === 'function') (plugin._pendingHooks = plugin._pendingHooks || []).push(cb); } catch (e) {} },
       },
       thymer: {
         query: async (collectionName) => {
@@ -1236,6 +1274,56 @@ class Plugin extends AppPlugin {
   }
 
   // ========================================================================
+  // GAP-5: (re)register one palette command per template. Prior handles removed first (refresh-safe).
+  async _registerTemplateCommands() {
+    try { for (const d of (this._tmplCmds || [])) { try { d(); } catch (e) {} } } catch (e) {}
+    this._tmplCmds = [];
+    try {
+      const tcol = await this.getTemplatesCollection(); if (!tcol) return;
+      const recs = await tcol.getAllRecords();
+      const plugin = this;
+      for (const t of (recs || []).slice(0, 40)) {
+        let name = ''; try { name = this.tName(t); } catch (e) {}
+        if (!name) continue;
+        const cmd = this.ui.addCommandPaletteCommand({
+          label: 'Templater: Apply "' + name + '"', icon: 'ti-files',
+          onSelected: () => { try { plugin._state.applyTemplateByName(name, {}); } catch (e) { console.warn('[Templater] per-template cmd', e); } }
+        });
+        if (cmd && cmd.remove) this._tmplCmds.push(() => { try { cmd.remove(); } catch (e) {} });
+      }
+    } catch (e) {}
+  }
+
+  // GAP-3: multi-select suggester modal (checkbox list + OK/Cancel). Resolves an array of chosen
+  // indices ([] on cancel/Esc/click-outside). Enter = OK.
+  asyncMultiSuggester(title, labels) {
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div'); overlay.className = 'tmpl-overlay';
+      const modal = document.createElement('div'); modal.className = 'tmpl-modal';
+      modal.innerHTML = '<h2>' + this.escape(title) + '</h2>';
+      const list = document.createElement('div'); list.style.cssText = 'max-height:46vh;overflow-y:auto;margin:4px 0 8px;';
+      const boxes = [];
+      (labels || []).forEach((l) => {
+        const row = document.createElement('label'); row.style.cssText = 'display:flex;gap:8px;align-items:center;padding:5px 2px;cursor:pointer;font-weight:400;';
+        const cb = document.createElement('input'); cb.type = 'checkbox'; boxes.push(cb);
+        row.appendChild(cb); row.appendChild(document.createTextNode(String(l)));
+        list.appendChild(row);
+      });
+      modal.appendChild(list);
+      const actions = document.createElement('div'); actions.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:10px;';
+      const cancel = document.createElement('button'); cancel.className = 'tmpl-btn'; cancel.textContent = 'Cancel';
+      const ok = document.createElement('button'); ok.className = 'tmpl-btn primary'; ok.textContent = 'OK';
+      actions.appendChild(cancel); actions.appendChild(ok); modal.appendChild(actions);
+      overlay.appendChild(modal); document.body.appendChild(overlay);
+      const close = (v) => { try { document.body.removeChild(overlay); } catch (e) {} resolve(v); };
+      cancel.onclick = () => close([]);
+      ok.onclick = () => close(boxes.map((b, i) => b.checked ? i : -1).filter(i => i >= 0));
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) close([]); });
+      modal.addEventListener('keydown', (e) => { if (e.key === 'Escape') close([]); if (e.key === 'Enter') ok.onclick(); });
+      setTimeout(() => { const f = modal.querySelector('input'); if (f) f.focus(); }, 30);
+    });
+  }
+
   // Modal: async suggester (keyboard-navigable). Resolves the chosen index, or -1.
   // Uses a stable named keydown handler + explicit teardown in every close path,
   // and registers teardown on _state.disposers so an outer tear-down can't leak it.
@@ -2161,6 +2249,14 @@ class Plugin extends AppPlugin {
       (createdNewGuid ? ("Created \"" + title + "\"") : (updateMode ? ("Updated \"" + (targetRecord.getName ? targetRecord.getName() : title) + "\"") : "Appended to current record")) +
       (targetCollection && targetCollection.getName ? (" in " + targetCollection.getName()) : "")
     );
+
+    // GAP-4: drain tp.hooks.on_all_templates_executed callbacks — the full pipeline (props, body,
+    // tasks, relations, banner) is done; runs BEFORE the mindmap/hybrid/nav early-returns so every
+    // exit path fires the hooks. Each cb gets the target record guid.
+    if (this._pendingHooks && this._pendingHooks.length) {
+      const hooks = this._pendingHooks.splice(0);
+      for (const cb of hooks) { try { await cb(targetRecord.guid); } catch (e) { console.warn('[Templater] on_all_templates_executed hook failed:', e); } }
+    }
 
     // TS-8: "born as a mind map" — flip the new record into a drawing AND build a mind map from its headings.
     if (wantMindmap && createdNewGuid) {
