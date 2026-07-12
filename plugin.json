@@ -1,6 +1,6 @@
 {
   "ver": 1,
-  "version": "2.44.1",
+  "version": "2.45.0",
   "name": "Templater",
   "icon": "ti-files",
   "description": "Apply templates from any collection \u2014 fills title, properties, body. Fill-vs-create chooser; empty bullets/tasks render natively; {{task:}} spawns linked Rich Tasks; record dropdowns offer none/\uff0bNew. Native datetime/ref/tag segments, moment dates, schema-aware typing, tp.* helpers incl. tp.user/tp.brain, {{relate}}/{{banner}}/{{cursor}}, plexus:hybrid/mindmap, auto-apply (+#auto headless).",

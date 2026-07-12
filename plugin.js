@@ -3665,8 +3665,11 @@ class Plugin extends AppPlugin {
             if (this.readLastFired(tmpl) >= due) return;                 // another tab already fired + stamped this occurrence
             if (!(await this.evalCondition(this.conditionOf(tmpl)))) return;
             const tgt = await this.resolveTarget(tmpl); if (!tgt) { console.warn('[Templater] schedule: no target for "' + this.tName(tmpl) + '"'); return; }
-            if (tgt.mode === 'append' && await this._journalAlreadyHas(tgt.record, tmpl)) { this.stampLastFired(tmpl); return; } // idempotent on the day page
-            if (await this.fireTemplate(tmpl, Object.assign({ reason: 'schedule:' + (reason || '') }, tgt))) fired++;
+            await this._withTargetTemplateLock(gkey, tgt.recGuid, async () => {
+              if (tgt.mode === 'append' && await this._journalAlreadyHas(tgt.record, tmpl)) { this.stampLastFired(tmpl); return false; }
+              if (await this.fireTemplate(tmpl, Object.assign({ reason: 'schedule:' + (reason || '') }, tgt))) { fired++; return true; }
+              return false;
+            });
           });
         } catch (e) { console.warn('[Templater] schedule fire error', e); }
       }
@@ -3702,6 +3705,29 @@ class Plugin extends AppPlugin {
     } catch (e) {}
     await fn();
     return true;
+  }
+  // Serialize every automatic append for one template+target, regardless of
+  // which trigger discovered it (journal.open, schedule, or app.open). The old
+  // locks were trigger-specific, so schedule and journal.open could both pass
+  // the body probe before either had written its first line and append the same
+  // dashboard twice. The content proof is deliberately re-read INSIDE this
+  // transaction by each caller.
+  async _withTargetTemplateLock(templateGuid, targetGuid, fn) {
+    if (!templateGuid || !targetGuid || typeof fn !== 'function') return false;
+    const name = 'templater-target-' + templateGuid + '-' + targetGuid;
+    try {
+      if (typeof navigator !== 'undefined' && navigator.locks && navigator.locks.request) {
+        let result = false;
+        await navigator.locks.request(name, { mode: 'exclusive' }, async () => { result = await fn(); });
+        return result;
+      }
+    } catch (_e) { /* fall through to this instance's promise queue */ }
+    const locks = this._state.targetTemplateLocks || (this._state.targetTemplateLocks = new Map());
+    const prior = locks.get(name) || Promise.resolve();
+    let release; const gate = new Promise(resolve => { release = resolve; });
+    const holder = prior.then(() => gate); locks.set(name, holder);
+    try { await prior; return await fn(); }
+    finally { release(); if (locks.get(name) === holder) locks.delete(name); }
   }
   // append-mode idempotence: skip if the day page already contains the template's first real heading text
   // (belt-and-suspenders behind the per-occurrence Last Fired dedup — so a lost stamp can't double-append).
@@ -3776,14 +3802,28 @@ class Plugin extends AppPlugin {
       } catch (_e) {}
       this._state.journalSeen.add(dayKey);
       const cols = await this.getCollectionsCached(); const jcol = cols.find(c => { try { return c.isJournalPlugin && c.isJournalPlugin(); } catch (e) { return false; } }) || null;
-      for (const tmpl of tmpls) { try { if (!(await this.evalCondition(this.conditionOf(tmpl), recGuid))) continue; if (await this._journalAlreadyHas(rec, tmpl)) continue; await this.fireTemplate(tmpl, { record: rec, recGuid, targetCollection: jcol, mode: 'append', reason: 'journal.open' }); } catch (e) { console.warn('[Templater] journal-open trigger error', e); } }
+      for (const tmpl of tmpls) { try {
+        if (!(await this.evalCondition(this.conditionOf(tmpl), recGuid))) continue;
+        const templateGuid = this.guidOf(tmpl); if (!templateGuid) continue;
+        await this._withTargetTemplateLock(templateGuid, recGuid, async () => {
+          if (await this._journalAlreadyHas(rec, tmpl)) return false;
+          return await this.fireTemplate(tmpl, { record: rec, recGuid, targetCollection: jcol, mode: 'append', reason: 'journal.open' });
+        });
+      } catch (e) { console.warn('[Templater] journal-open trigger error', e); } }
     } catch (e) { console.warn('[Templater] onPanelNavigated error', e); }
   }
   async fireAppOpen() {
     try {
       if (this._state.appOpenFired) return; this._state.appOpenFired = true;
       const idx = await this.getTriggerIndex(); const tmpls = idx.byEvent['app.open']; if (!tmpls || !tmpls.length) return;
-      for (const tmpl of tmpls) { try { if (!(await this.evalCondition(this.conditionOf(tmpl)))) continue; const tgt = await this.resolveTarget(tmpl); if (!tgt) continue; if (tgt.mode === 'append' && await this._journalAlreadyHas(tgt.record, tmpl)) continue; await this.fireTemplate(tmpl, Object.assign({ reason: 'app.open' }, tgt)); } catch (e) { console.warn('[Templater] app.open trigger error', e); } }
+      for (const tmpl of tmpls) { try {
+        if (!(await this.evalCondition(this.conditionOf(tmpl)))) continue;
+        const tgt = await this.resolveTarget(tmpl), templateGuid = this.guidOf(tmpl); if (!tgt || !templateGuid) continue;
+        await this._withTargetTemplateLock(templateGuid, tgt.recGuid, async () => {
+          if (tgt.mode === 'append' && await this._journalAlreadyHas(tgt.record, tmpl)) return false;
+          return await this.fireTemplate(tmpl, Object.assign({ reason: 'app.open' }, tgt));
+        });
+      } catch (e) { console.warn('[Templater] app.open trigger error', e); } }
     } catch (e) { console.warn('[Templater] fireAppOpen error', e); }
   }
   _ymd(d) { return '' + d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0'); }
