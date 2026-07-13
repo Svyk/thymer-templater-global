@@ -7,6 +7,7 @@
 
 console.log('%c[Templater] v2.44.1 (cross-tab journal.open dedup) loaded — 10X Phase D (ALL 10 SHIPPED): (1) INSERT snippet row in the Edit dialog — one-click starters for dc: tables/lists, {{attr}}, {{if}}/{{else}}, {{task}}, cascade {{relate+}} (caret-inserted; autocomplete refines). (2) AI TEMPLATE SYNTHESIS — command \"Templater: New template from example…\": pick any record, the LLM turns its props/body into a reusable template ({{prompt:}}/{{prompt.choice::}}/{{date:}} tokens; structure + dc:/attr lines verbatim) and opens the editor on the draft. The full 10x set: conditionals/WHOOP branches (A), merge re-apply + chains + version migration (B), relate cascade + Smart Capture + schema-form toggle (C), snippets + AI synthesis (D). ——— v2.42.0 10X Phase C: (1) RELATE CASCADE — {{relate:Field=Name :: create=Collection :: apply=Template}} creates a missing relation target and merge-applies a template onto it (one apply scaffolds a linked subgraph). (2) SMART CAPTURE — command \"Templater: Smart capture…\" (+ spine __templater.smartCapture(text)): raw text in, the LLM picks the best template AND pre-fills its prompts; manual-picker fallback when the /llm proxy is down. (3) The TP-19 typed schema FORM is now a checkbox in the Edit dialog (was a hand-edited Variables JSON {\"form\":true} opt-in). ——— v2.41.0 10X Phase B: (1) IDEMPOTENT MERGE RE-APPLY — apply with mode:merge adds ONLY missing sections (top-level-heading diff) and fills ONLY empty properties (never renames/overwrites); directives re-collected from the filtered body so a re-apply never respawns tasks/relations. (2) TRIGGER CHAINS — Variables JSON {\"then\":\"Next Template\"} merge-applies the next template onto the record after this one completes (depth-capped 3, self-chain ignored). (3) VERSION MIGRATION — command \"Templater: Re-scaffold outdated records…\" reads the audit log for records born from an older template Version and merge-applies the current one (cap 25, confirm-first). ——— v2.40.0 10X Phase A: CONDITIONAL SECTIONS — {{if:<cond>}} … {{else}} … {{endif}} renders a branch by a typed property (Type=Meeting / Status!=Done) or a LIVE Attributes value ({{if:attr:Recovery>66}}deep-work{{else}}admin{{endif}} — the WHOOP-aware daily note). Unknown → false; keep {{prompt:}} outside branches (prompt collection precedes render). ——— v2.39.0 ORIGINAL-TEMPLATER PARITY (gap analysis vs SilentVoid13/Templater): (1) <% expr %> INTERPOLATION — plain-expression form now renders (<% tp.date.now(\"YYYY-MM-DD\") %>, <% tp.file.title %>; <%- -%>/<%_ _%>/<%+ accepted), so Obsidian templates paste in portably; (2) tp.web.request(url)/daily_quote()/random_picture(size) — plugin-side fetch surfaced to authors; (3) tp.system.multi_suggester is now a REAL checkbox multi-select modal (was a single-select stub); (4) tp.hooks.on_all_templates_executed(cb) fires after the full apply pipeline; (5) a palette command PER template (Templater: Apply \"Daily Note\") — the per-template-hotkey analog, auto-refreshed when Templates change. Full matrix in GAP_ANALYSIS.md. ——— v2.38.0 EDITOR BODY-PRECEDENCE FIX: the Edit dialog loaded the NATIVE outline body whenever one existed, but apply uses the Template Content TEXT body first — so a template with both (e.g. Daily Note: full template in Template Content + a stale 2-line outline fragment) showed only the fragment, the real body was uneditable, and SAVING would have rewritten Template Content to frontmatter-only (destroying the template). The editor now mirrors apply (text body first, native only when text is empty) and warns when both stores are populated (saving as Text removes the stale outline). ——— v2.37.0 editor: "Fills a new record in" now offers "— none (ask on apply) —" (unpinned template — apply-time picker chooses the collection; auto-apply disabled when none); "Templater: New template…" command (+ "＋ New template…" in the edit picker) creates a template via this dialog; fixed the auto-apply checkbox layout (was detached from its label) + clearer wording. FULL-CONTROL EDITOR: "Templater: Edit template…" now edits the BODY too (markdown textarea + Native-outline/Text storage toggle — Native is editable here AND in the doc), the raw Variables (JSON), plus property rows/Auto-apply/Auto Title/Title Pattern. AUTOCOMPLETE (Datacore-style) in every value field + body: type {{ for the token menu (with hints), {{record. for fields, dc: @ for collections. In-dialog Template-language reference + a fully rewritten README documenting every token. Earlier: the FORM editor writes the --- frontmatter + settings back to the record — no hand-editing the cramped text field. HEADING NESTING: a heading now PARENTS the lines beneath it (so "- Key point" under "## Notes" is a real child); opt out per template with Variables JSON {"nest":"flat"}. NATIVE-EDITOR AUTHORING: write a template\'s BODY as normal nested bullets/headings in the template record itself (WYSIWYG, drag-to-indent) and Templater reads it — frontmatter stays in the short Template Content --- block; used only when that text body is empty, so existing markdown templates are unchanged. PER-COLLECTION AUTO-APPLY: set a template\'s "Trigger On" = record.created:<Collection> and a NEW record in that collection auto-scaffolds (silent, no prompts; dangling-separator title junk now stripped so interactive templates auto-apply cleanly). Local UI creates fire automatically; remote/MCP creates need a #auto tag. +SPINE __templater.applyTemplateByName(name,{prompts,mode,collection}) runs the FULL apply pipeline headless (for the Quick Add plugin). AUTO-TITLE: type the body, the title builds itself. Per-collection via the template\'s "Auto Title" (Off/On) + "Title Pattern"; strategy inferred from the pattern tokens. {{firstline}} → titles from the first body line on every edit (debounced ~1.2s) — e.g. Notes. Property patterns ({{Type}} · {{Attendees}}) → auto-title on property edits. SET-ONCE-UNTIL-MANUAL: auto fills only while the title is blank/Untitled/auto-owned; the moment you type your own title it\'s locked (never fights you). On-demand: command "Templater: AI title this note" → a 4-6 word AI summary title (needs the /llm proxy on :8787). Manual: "Templater: Rename from properties" still works for any collection. Spine: __templater.aiTitleActive/autoTitleByGuid(guid,collName)/composeTitle. ——— RENAME FROM PROPERTIES + TRIGGERS ENGINE (schedule/event/condition; Daily Note @ 06:00 → journal:today) unchanged. Plus <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
 
+console.log('%c[Templater] runtime v2.45.1 — transactional, resumable automatic append', 'color:#10b981;font-weight:bold');
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
 const RECURSION_LIMIT = 3;
@@ -2333,7 +2334,7 @@ class Plugin extends AppPlugin {
     const existing = new Set();
     let hadAny = false;
     try {
-      const items = await record.getLineItems(false);
+      const items = await this._freshLineItems(record, true);
       hadAny = !!(items && items.length);
       for (const li of (items || [])) {
         try {
@@ -2353,6 +2354,27 @@ class Plugin extends AppPlugin {
       if (keep) out.push(ln);
     }
     return out.join('\n');
+  }
+
+  // A journal wrapper captured during panel navigation can briefly expose an
+  // empty pre-replication body even when the page already has content. Re-read
+  // the exact target and give an empty snapshot a short bounded settle window.
+  // A populated page normally returns on the first attempt.
+  async _freshLineItems(record, settleEmpty) {
+    let guid = null;
+    try { guid = record && (record.guid || (record.getGuid && record.getGuid())); } catch (_e) {}
+    let items = [];
+    const waits = settleEmpty ? [80, 160, 320] : [];
+    for (let attempt = 0; attempt <= waits.length; attempt++) {
+      let current = record;
+      if (guid) {
+        try { let resolved = this.data && this.data.getRecord && this.data.getRecord(guid); if (resolved && resolved.then) resolved = await resolved; if (resolved) current = resolved; } catch (_e) {}
+      }
+      try { items = current && current.getLineItems ? await current.getLineItems(false) : []; } catch (_e) { items = []; }
+      if ((items && items.length) || attempt === waits.length) return items || [];
+      await new Promise(resolve => setTimeout(resolve, waits[attempt]));
+    }
+    return items || [];
   }
 
   async applyTemplate(template, rendered, opts) {
@@ -3633,9 +3655,15 @@ class Plugin extends AppPlugin {
       // auto-applied template lays down a clean SCAFFOLD instead of clobbering the title with junk.
       if (parsed.frontmatter) parsed.frontmatter = this._cleanAutoFrontmatter(parsed.frontmatter);
       const wantPromote = /<!--PLEXUS-PROMOTE-->/i.test(parsed.body || '');
-      const body = (parsed.body || '').replace(/<!--PLEXUS-PROMOTE-->/gi, '');
+      const originalBody = (parsed.body || '').replace(/<!--PLEXUS-PROMOTE-->/gi, '');
+      // Append triggers are resumable and idempotent at the section boundary.
+      // This second proof runs inside the target+template lock, after rendering,
+      // so an interrupted earlier run or stale pre-lock probe cannot duplicate
+      // sections that already landed; missing later sections are repaired.
+      const body = mode === 'append' ? await this._mergeFilterBody(record, originalBody) : originalBody;
+      if (mode === 'append' && !body.trim()) { this.stampLastFired(tmpl); return false; }
       if (mode !== 'append' && parsed.frontmatter && Object.keys(parsed.frontmatter).length) { try { await this.applyFrontmatter(record, parsed.frontmatter); } catch (e) {} }
-      if (body.trim()) { try { await this.writeBody(record, body, { flat: vars && vars.nest === 'flat' }); } catch (e) {} }
+      if (body.trim()) await this.writeBody(record, body, { flat: vars && vars.nest === 'flat' });
       if (wantPromote) this._promoteAfterApply(record);
       try { const p = tmpl.prop && tmpl.prop(F_LASTUSED); if (p && p.setFromDate) p.setFromDate(new Date()); } catch (e) {}
       this.stampLastFired(tmpl);
@@ -3734,7 +3762,7 @@ class Plugin extends AppPlugin {
   async _journalAlreadyHas(record, tmpl) {
     try {
       const probe = this._templateProbe(tmpl); if (!probe) return false;
-      const items = await record.getLineItems(false);
+      const items = await this._freshLineItems(record, true);
       for (const li of (items || [])) { let t = ''; for (const s of (li.segments || [])) if (s && typeof s.text === 'string') t += s.text; if (t.indexOf(probe) >= 0) return true; }
     } catch (e) {}
     return false;

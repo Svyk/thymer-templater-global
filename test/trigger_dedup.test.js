@@ -33,4 +33,15 @@ const Plugin = new Function(source + '\n;return Plugin;')();
   assert.strictEqual(writes, 1, 'schedule+journal discovery may append only once');
   assert.strictEqual(plugin._state.targetTemplateLocks.size, 0, 'lock queue is released');
   console.log('PASS target-template transaction serializes competing automatic triggers and rechecks content');
+
+  // An interrupted first pass wrote two sections. A stale navigation wrapper
+  // says the page is empty, but the fresh target proves those sections exist.
+  const heading = text => ({ type: 'heading', segments: [{ type: 'text', text }] });
+  const stale = { guid: 'TARGET', getLineItems: async () => [] };
+  const fresh = { guid: 'TARGET', getLineItems: async () => [heading('Quick Log'), heading('Focus')] };
+  plugin.data = { getRecord: () => fresh };
+  const remaining = await plugin._mergeFilterBody(stale,
+    '## Quick Log\ndc.js: quick\n## Focus\nFocus::\n## Morning check-in\n- Energy::');
+  assert.strictEqual(remaining, '## Morning check-in\n- Energy::');
+  console.log('PASS automatic append re-resolves stale journals and writes only missing sections');
 })().catch(error => { console.error(error); process.exit(1); });
