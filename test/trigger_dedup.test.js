@@ -44,4 +44,28 @@ const Plugin = new Function(source + '\n;return Plugin;')();
     '## Quick Log\ndc.js: quick\n## Focus\nFocus::\n## Morning check-in\n- Energy::');
   assert.strictEqual(remaining, '## Morning check-in\n- Energy::');
   console.log('PASS automatic append re-resolves stale journals and writes only missing sections');
+
+  // Desktop and Chrome do not share a Web Locks/localStorage origin. They write distinct
+  // pre-due claim values into the host-synced Last Fired scalar, settle, and only the client
+  // whose value survives convergence may create Journal lines.
+  let canonicalClaim = 0;
+  const makeTemplate = () => ({
+    guid: 'TEMPLATE',
+    prop: () => ({ setFromDate: date => { canonicalClaim = date.getTime(); } }),
+    date: () => new Date(canonicalClaim),
+  });
+  const desktop = new Plugin(), chrome = new Plugin();
+  desktop._state = { lastFired: new Map(), scheduleClaimClientId: 'desktop-client', scheduleClaimSettleMs: 0 };
+  chrome._state = { lastFired: new Map(), scheduleClaimClientId: 'chrome-client', scheduleClaimSettleMs: 0 };
+  const desktopTemplate = makeTemplate(), chromeTemplate = makeTemplate();
+  desktop.data = { getRecord: () => desktopTemplate };
+  chrome.data = { getRecord: () => chromeTemplate };
+  const due = Date.now();
+  const claims = await Promise.all([
+    desktop._claimScheduleOccurrence(desktopTemplate, due),
+    chrome._claimScheduleOccurrence(chromeTemplate, due),
+  ]);
+  assert.strictEqual(claims.filter(result => result.claimed).length, 1, 'one independent client wins the synced scalar claim');
+  assert.ok(canonicalClaim < due, 'claim stays pre-due so a crash cannot suppress retry');
+  console.log('PASS Desktop and Chrome settle one host-synced pre-due schedule claim');
 })().catch(error => { console.error(error); process.exit(1); });

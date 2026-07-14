@@ -1,13 +1,11 @@
-// Thymer Templater v2 — global AppPlugin
+// Thymer Templater v2.45.2 — cross-client schedule settlement.
 // Full template language: prompt / date / record.Prop / var.NAME / ref / tag /
 // include (recursion limit 3) / <%* async js %> with tp.* namespace + blocklist.
 // Frontmatter -> properties, title-setting, segment-aware nested body writer, all
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.44.1 (cross-tab journal.open dedup) loaded — 10X Phase D (ALL 10 SHIPPED): (1) INSERT snippet row in the Edit dialog — one-click starters for dc: tables/lists, {{attr}}, {{if}}/{{else}}, {{task}}, cascade {{relate+}} (caret-inserted; autocomplete refines). (2) AI TEMPLATE SYNTHESIS — command \"Templater: New template from example…\": pick any record, the LLM turns its props/body into a reusable template ({{prompt:}}/{{prompt.choice::}}/{{date:}} tokens; structure + dc:/attr lines verbatim) and opens the editor on the draft. The full 10x set: conditionals/WHOOP branches (A), merge re-apply + chains + version migration (B), relate cascade + Smart Capture + schema-form toggle (C), snippets + AI synthesis (D). ——— v2.42.0 10X Phase C: (1) RELATE CASCADE — {{relate:Field=Name :: create=Collection :: apply=Template}} creates a missing relation target and merge-applies a template onto it (one apply scaffolds a linked subgraph). (2) SMART CAPTURE — command \"Templater: Smart capture…\" (+ spine __templater.smartCapture(text)): raw text in, the LLM picks the best template AND pre-fills its prompts; manual-picker fallback when the /llm proxy is down. (3) The TP-19 typed schema FORM is now a checkbox in the Edit dialog (was a hand-edited Variables JSON {\"form\":true} opt-in). ——— v2.41.0 10X Phase B: (1) IDEMPOTENT MERGE RE-APPLY — apply with mode:merge adds ONLY missing sections (top-level-heading diff) and fills ONLY empty properties (never renames/overwrites); directives re-collected from the filtered body so a re-apply never respawns tasks/relations. (2) TRIGGER CHAINS — Variables JSON {\"then\":\"Next Template\"} merge-applies the next template onto the record after this one completes (depth-capped 3, self-chain ignored). (3) VERSION MIGRATION — command \"Templater: Re-scaffold outdated records…\" reads the audit log for records born from an older template Version and merge-applies the current one (cap 25, confirm-first). ——— v2.40.0 10X Phase A: CONDITIONAL SECTIONS — {{if:<cond>}} … {{else}} … {{endif}} renders a branch by a typed property (Type=Meeting / Status!=Done) or a LIVE Attributes value ({{if:attr:Recovery>66}}deep-work{{else}}admin{{endif}} — the WHOOP-aware daily note). Unknown → false; keep {{prompt:}} outside branches (prompt collection precedes render). ——— v2.39.0 ORIGINAL-TEMPLATER PARITY (gap analysis vs SilentVoid13/Templater): (1) <% expr %> INTERPOLATION — plain-expression form now renders (<% tp.date.now(\"YYYY-MM-DD\") %>, <% tp.file.title %>; <%- -%>/<%_ _%>/<%+ accepted), so Obsidian templates paste in portably; (2) tp.web.request(url)/daily_quote()/random_picture(size) — plugin-side fetch surfaced to authors; (3) tp.system.multi_suggester is now a REAL checkbox multi-select modal (was a single-select stub); (4) tp.hooks.on_all_templates_executed(cb) fires after the full apply pipeline; (5) a palette command PER template (Templater: Apply \"Daily Note\") — the per-template-hotkey analog, auto-refreshed when Templates change. Full matrix in GAP_ANALYSIS.md. ——— v2.38.0 EDITOR BODY-PRECEDENCE FIX: the Edit dialog loaded the NATIVE outline body whenever one existed, but apply uses the Template Content TEXT body first — so a template with both (e.g. Daily Note: full template in Template Content + a stale 2-line outline fragment) showed only the fragment, the real body was uneditable, and SAVING would have rewritten Template Content to frontmatter-only (destroying the template). The editor now mirrors apply (text body first, native only when text is empty) and warns when both stores are populated (saving as Text removes the stale outline). ——— v2.37.0 editor: "Fills a new record in" now offers "— none (ask on apply) —" (unpinned template — apply-time picker chooses the collection; auto-apply disabled when none); "Templater: New template…" command (+ "＋ New template…" in the edit picker) creates a template via this dialog; fixed the auto-apply checkbox layout (was detached from its label) + clearer wording. FULL-CONTROL EDITOR: "Templater: Edit template…" now edits the BODY too (markdown textarea + Native-outline/Text storage toggle — Native is editable here AND in the doc), the raw Variables (JSON), plus property rows/Auto-apply/Auto Title/Title Pattern. AUTOCOMPLETE (Datacore-style) in every value field + body: type {{ for the token menu (with hints), {{record. for fields, dc: @ for collections. In-dialog Template-language reference + a fully rewritten README documenting every token. Earlier: the FORM editor writes the --- frontmatter + settings back to the record — no hand-editing the cramped text field. HEADING NESTING: a heading now PARENTS the lines beneath it (so "- Key point" under "## Notes" is a real child); opt out per template with Variables JSON {"nest":"flat"}. NATIVE-EDITOR AUTHORING: write a template\'s BODY as normal nested bullets/headings in the template record itself (WYSIWYG, drag-to-indent) and Templater reads it — frontmatter stays in the short Template Content --- block; used only when that text body is empty, so existing markdown templates are unchanged. PER-COLLECTION AUTO-APPLY: set a template\'s "Trigger On" = record.created:<Collection> and a NEW record in that collection auto-scaffolds (silent, no prompts; dangling-separator title junk now stripped so interactive templates auto-apply cleanly). Local UI creates fire automatically; remote/MCP creates need a #auto tag. +SPINE __templater.applyTemplateByName(name,{prompts,mode,collection}) runs the FULL apply pipeline headless (for the Quick Add plugin). AUTO-TITLE: type the body, the title builds itself. Per-collection via the template\'s "Auto Title" (Off/On) + "Title Pattern"; strategy inferred from the pattern tokens. {{firstline}} → titles from the first body line on every edit (debounced ~1.2s) — e.g. Notes. Property patterns ({{Type}} · {{Attendees}}) → auto-title on property edits. SET-ONCE-UNTIL-MANUAL: auto fills only while the title is blank/Untitled/auto-owned; the moment you type your own title it\'s locked (never fights you). On-demand: command "Templater: AI title this note" → a 4-6 word AI summary title (needs the /llm proxy on :8787). Manual: "Templater: Rename from properties" still works for any collection. Spine: __templater.aiTitleActive/autoTitleByGuid(guid,collName)/composeTitle. ——— RENAME FROM PROPERTIES + TRIGGERS ENGINE (schedule/event/condition; Daily Note @ 06:00 → journal:today) unchanged. Plus <%* tp.* %>, {{ai:}}, render/renderTemplateByName.', 'color:#10b981;font-weight:bold');
-
-console.log('%c[Templater] runtime v2.45.1 — transactional, resumable automatic append', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.45.2 loaded — cross-client claimed, transactional, resumable automatic append.', 'color:#10b981;font-weight:bold');
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
 const RECURSION_LIMIT = 3;
@@ -76,6 +74,8 @@ class Plugin extends AppPlugin {
       applying: _prev.applying || new Set(),       // records the engine is writing to — guards self-trigger loops
       lastFired: _prev.lastFired || new Map(),      // tmplGuid -> last-fired occurrence ms (mirrors the Last Fired prop)
       journalSeen: _prev.journalSeen || new Set(),  // "guid|YYYYMMDD" — journal.open dedup per page per day
+      scheduleClaimClientId: _prev.scheduleClaimClientId || null,
+      scheduleClaimSettleMs: Number.isFinite(_prev.scheduleClaimSettleMs) ? _prev.scheduleClaimSettleMs : 1800,
       appOpenFired: false,
       collCache: null,
       autoIndex: null,
@@ -3469,6 +3469,72 @@ class Plugin extends AppPlugin {
     return 0;
   }
 
+  // Direct synced read, deliberately bypassing this client's in-memory/localStorage mirrors.
+  // It is used only by the distributed schedule claim below, where every independent Thymer
+  // client must observe the single scalar value that won host convergence.
+  _readSyncedLastFired(tmpl) {
+    try {
+      const d = tmpl && tmpl.date && tmpl.date(F_LASTFIRED);
+      if (!d) return 0;
+      if (typeof d.getTime === 'function') { const n = Number(d.getTime()); return Number.isFinite(n) ? n : 0; }
+      if (typeof d.value === 'function') {
+        const v = d.value();
+        if (v && typeof v.getTime === 'function') { const n = Number(v.getTime()); return Number.isFinite(n) ? n : 0; }
+        const n = Number(v); if (Number.isFinite(n)) return n;
+      }
+    } catch (_e) {}
+    return 0;
+  }
+
+  _scheduleClaimId() {
+    if (this._state.scheduleClaimClientId) return this._state.scheduleClaimClientId;
+    const key = 'templater-schedule-client-v1';
+    let id = '';
+    try { id = localStorage.getItem(key) || ''; } catch (_e) {}
+    if (!id) {
+      try { id = crypto.randomUUID(); } catch (_e) { id = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2); }
+      try { localStorage.setItem(key, id); } catch (_e) {}
+    }
+    this._state.scheduleClaimClientId = id;
+    return id;
+  }
+
+  _scheduleClaimMs(due) {
+    const text = this._scheduleClaimId() + '|' + String(due);
+    let hash = 2166136261;
+    for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619);
+    // The claim remains strictly BEFORE the due occurrence, so a crashed claimant never suppresses
+    // the next retry. Second precision survives Thymer datetime normalization; 50k slots make an
+    // accidental same-occurrence collision between independent clients vanishingly unlikely.
+    return Number(due) - (1 + ((hash >>> 0) % 50000)) * 1000;
+  }
+
+  async _claimScheduleOccurrence(tmpl, due) {
+    const guid = this.guidOf(tmpl);
+    let prop = null;
+    try { prop = tmpl && tmpl.prop && tmpl.prop(F_LASTFIRED); } catch (_e) {}
+    if (!guid || !prop || typeof prop.setFromDate !== 'function') return { claimed: true, fallback: 'local-only' };
+    const claimMs = this._scheduleClaimMs(due);
+    try {
+      const write = prop.setFromDate(new Date(claimMs));
+      if (write && typeof write.then === 'function') await write;
+    } catch (_e) { return { claimed: true, fallback: 'claim-write-unavailable' }; }
+
+    // Async settling never blocks editor interaction. It gives Desktop and browser clients time to
+    // converge their competing scalar claims before either creates a Journal line.
+    const settleMs = Math.max(0, Number(this._state.scheduleClaimSettleMs) || 0);
+    await new Promise(resolve => setTimeout(resolve, settleMs));
+    let current = tmpl;
+    try {
+      let resolved = this.data && this.data.getRecord && this.data.getRecord(guid);
+      if (resolved && typeof resolved.then === 'function') resolved = await resolved;
+      if (resolved) current = resolved;
+    } catch (_e) {}
+    const observed = this._readSyncedLastFired(current);
+    if (observed) this._state.lastFired.set(guid, observed);
+    return { claimed: Math.abs(observed - claimMs) < 1000, fallback: null, claimMs, observed };
+  }
+
   // Parse the comma list of event specs from Trigger On + legacy auto:<Coll> in the Triggers choice.
   triggerEventSpecs(tmpl) {
     const out = [], seen = new Set();
@@ -3693,6 +3759,8 @@ class Plugin extends AppPlugin {
             if (this.readLastFired(tmpl) >= due) return;                 // another tab already fired + stamped this occurrence
             if (!(await this.evalCondition(this.conditionOf(tmpl)))) return;
             const tgt = await this.resolveTarget(tmpl); if (!tgt) { console.warn('[Templater] schedule: no target for "' + this.tName(tmpl) + '"'); return; }
+            const claim = await this._claimScheduleOccurrence(tmpl, due);
+            if (!claim.claimed) return;                                  // another Desktop/browser client won host convergence
             await this._withTargetTemplateLock(gkey, tgt.recGuid, async () => {
               if (tgt.mode === 'append' && await this._journalAlreadyHas(tgt.record, tmpl)) { this.stampLastFired(tmpl); return false; }
               if (await this.fireTemplate(tmpl, Object.assign({ reason: 'schedule:' + (reason || '') }, tgt))) { fired++; return true; }

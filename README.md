@@ -2,6 +2,8 @@
 
 A Thymer **global AppPlugin** that turns saved template records into fully-formed Thymer records — title, typed properties, and native nested body — in one keystroke. Pick a template, answer any prompts, and Templater renders the tokens and applies the result to a new or existing record. Templates can also **auto-apply** when you create a record, run on a **schedule**, and be edited through a **form dialog** with autocomplete.
 
+**v2.45.2:** scheduled appends now settle one host-synced pre-due claim before writing. This closes the Desktop-versus-browser race that Web Locks and localStorage cannot coordinate, while leaving a crashed claim retryable and keeping the wait entirely off the editor's main interaction path.
+
 Templates live in the **Templates** collection — one record per template. The body can be authored as the template record's own nested outline (WYSIWYG) or as a markdown block in the `Template Content` text property; the short `---` frontmatter (which sets the new record's properties) lives in `Template Content`.
 
 ## Entry points
