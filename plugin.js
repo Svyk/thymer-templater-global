@@ -1,11 +1,11 @@
-// Thymer Templater v2.45.2 — cross-client schedule settlement.
+// Thymer Templater v2.46.0 — Journal fill fix + per-collection Auto-title rules.
 // Full template language: prompt / date / record.Prop / var.NAME / ref / tag /
 // include (recursion limit 3) / <%* async js %> with tp.* namespace + blocklist.
 // Frontmatter -> properties, title-setting, segment-aware nested body writer, all
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.45.2 loaded — cross-client claimed, transactional, resumable automatic append.', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.46.0 loaded — Journal fill + per-collection Auto-title rules.', 'color:#10b981;font-weight:bold');
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
 const RECURSION_LIMIT = 3;
@@ -31,6 +31,12 @@ const F_TARGET = "Target";         // for schedule/app.open: "journal:today" | "
 const F_LASTFIRED = "Last Fired";  // engine-written dedup stamp (datetime, synced; localStorage mirrors it)
 const F_TITLEPATTERN = "Title Pattern"; // per-collection title pattern, e.g. "{{Type}} · {{Lead}}" — Rename from properties
 const F_AUTOTITLE = "Auto Title";       // choice Off/On — auto-title records of this template's collection (set-once-until-manual)
+const AUTO_TITLE_RULES_KEY = "autoTitleRules";
+const AUTO_TITLE_PANEL_TYPE = "templater-auto-title-rules";
+const AUTO_TITLE_HOOK_NAME = "Templater Auto-title";
+const AUTO_TITLE_HOOK_START = "/* " + AUTO_TITLE_HOOK_NAME + ": managed collection hook - begin */";
+const AUTO_TITLE_HOOK_END = "/* " + AUTO_TITLE_HOOK_NAME + ": managed collection hook - end */";
+const AUTO_TITLE_STUB = "/* Templater Auto-title: managed collection stub */\nclass Plugin extends CollectionPlugin {\n\tonLoad() {}\n\tonUnload() {}\n}";
 const AUTOTITLE_DEBOUNCE_MS = 1200;     // per-record debounce for body-strategy auto-title
 const SCHED_TICK_MS = 60000;       // schedule engine tick
 const TRIGGER_TTL_MS = 30000;      // trigger-index cache TTL
@@ -48,6 +54,98 @@ const M_OPEN = String.fromCharCode(1);
 const M_SEP = String.fromCharCode(2);
 const M_CLOSE = String.fromCharCode(3);
 const MARKER_RE = new RegExp(M_OPEN + "(REF|TAG|DATE)" + M_SEP + "([^" + M_CLOSE + "]*)" + M_CLOSE, "g");
+
+// Core title-rule renderer adopted from akaready/thymer-build-title-from-properties.
+// The function is deliberately self-contained: the same source is embedded in the optional
+// collection-side customizeRecordTitle() hook, while Templater uses it to write real titles.
+function renderTemplaterAutoTitle(record, template, rawConfig, allowGetName) {
+  const config = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
+  const separator = typeof config.multiValueSeparator === 'string' ? config.multiValueSeparator : ', ';
+  const join = (values) => (values || []).filter(v => v != null && String(v).trim() !== '').map(v => String(v)).join(separator);
+  const name = () => {
+    for (const label of ['Title', 'Name']) {
+      try { const v = record && record.text && record.text(label); if (v != null && String(v).trim()) return String(v); } catch (e) {}
+      try { const p = record && record.prop && record.prop(label); const v = p && p.text && p.text(); if (v != null && String(v).trim()) return String(v); } catch (e) {}
+    }
+    if (allowGetName) { try { const v = record && record.getName && record.getName(); if (v != null) return String(v); } catch (e) {} }
+    return '';
+  };
+  const scalar = (value) => {
+    if (value == null) return '';
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value);
+    if (value instanceof Date) return isNaN(value.getTime()) ? '' : value.toISOString().slice(0, 10);
+    if (value.formatted) return String(value.formatted);
+    if (value.label) return String(value.label);
+    if (value.name) return String(value.name);
+    if (value.title) return String(value.title);
+    if (value.d && /^\d{8}$/.test(String(value.d))) return String(value.d).slice(0, 4) + '-' + String(value.d).slice(4, 6) + '-' + String(value.d).slice(6, 8);
+    try { if (value.getDisplayName) return String(value.getDisplayName() || ''); } catch (e) {}
+    try { if (value.getName) return String(value.getName() || ''); } catch (e) {}
+    return '';
+  };
+  const property = (fieldId) => {
+    let prop = null; try { prop = record && record.prop && record.prop(fieldId); } catch (e) {}
+    if (!prop) return '';
+    const readers = [
+      () => prop.selectedChoiceLabels && prop.selectedChoiceLabels(),
+      () => prop.users && prop.users(),
+      () => prop.linkedRecords && prop.linkedRecords(),
+      () => prop.datetimes && prop.datetimes(),
+      () => prop.dates && prop.dates(),
+      () => prop.texts && prop.texts(),
+      () => prop.numbers && prop.numbers(),
+      () => prop.values && prop.values(),
+    ];
+    for (const read of readers) {
+      try {
+        const values = read();
+        if (Array.isArray(values) && values.length) { const text = join(values.map(scalar)); if (text) return text; }
+      } catch (e) {}
+    }
+    for (const read of [() => prop.choiceLabel && prop.choiceLabel(), () => prop.text && prop.text(), () => prop.number && prop.number()]) {
+      try { const text = scalar(read()); if (text) return text; } catch (e) {}
+    }
+    return '';
+  };
+  const resolve = (token) => {
+    token = String(token || '').trim();
+    if (token === 'name' || token === 'title') return name();
+    if (!token.startsWith('field:')) return '';
+    return property(token.slice(6).trim());
+  };
+  const groupClose = (source, openIndex) => {
+    let depth = 0;
+    for (let i = openIndex; i < source.length; i++) {
+      if (source[i] === '\\') { i++; continue; }
+      if (source[i] === '{') depth++;
+      else if (source[i] === '}' && --depth === 0) return i;
+    }
+    return -1;
+  };
+  const render = (source, start, stop) => {
+    let text = '', hasValue = false, i = start;
+    while (i < source.length) {
+      const ch = source[i];
+      if (stop && ch === stop) return { text, hasValue, index: i + 1 };
+      if (ch === '\\' && i + 1 < source.length && '{}[]\\'.includes(source[i + 1])) { text += source[i + 1]; i += 2; continue; }
+      if (ch === '?' && source[i + 1] === '{') {
+        const end = groupClose(source, i + 1);
+        if (end >= 0) { const part = render(source.slice(i + 2, end), 0, null); if (part.hasValue) text += part.text; hasValue = hasValue || part.hasValue; i = end + 1; continue; }
+      }
+      if (ch === '[') { const part = render(source, i + 1, ']'); if (part.hasValue) text += part.text; hasValue = hasValue || part.hasValue; i = part.index; continue; }
+      if (ch === '{') {
+        let end = i + 1;
+        while (end < source.length && source[end] !== '}') { if (source[end] === '\\') end++; end++; }
+        if (end < source.length) { const value = resolve(source.slice(i + 1, end)); if (value) { text += value; hasValue = true; } i = end + 1; continue; }
+      }
+      text += ch; i++;
+    }
+    return { text, hasValue, index: i };
+  };
+  let text = render(String(template || ''), 0, null).text;
+  if (config.normalizeWhitespace !== false) text = text.replace(/\s+/g, ' ').trim();
+  return text.slice(0, 200);
+}
 
 class Plugin extends AppPlugin {
   onLoad() {
@@ -83,6 +181,7 @@ class Plugin extends AppPlugin {
       autoTitleIndex: null,                          // {body:{coll→pat}, prop:{coll→pat}} — Auto Title=On templates
       autoTitleDebounce: new Map(),                  // recGuid → setTimeout handle (body-strategy debounce)
       bodyMembers: null,                             // recGuid → {name,pat} membership for body collections (fallback)
+      autoTitlePanelRoots: new Set(),                // connected Auto-title settings panel roots
     };
     this._state = window.__templater;
     this._state._instance = this;   // test/debug seam (mirrors __quickadd._instance)
@@ -149,6 +248,18 @@ class Plugin extends AppPlugin {
       const rcmd = this.ui.addCommandPaletteCommand({ label: "Templater: Rename from properties", icon: "ti-heading", onSelected: () => plugin.renameFromActive() });
       if (rcmd && rcmd.remove) this._state.disposers.push(() => { try { rcmd.remove(); } catch (e) {} });
     } catch (e) { console.warn('[Templater] rename cmd add failed:', e); }
+    // v2.46: GUI for canonical per-collection Auto-title rules + optional display-only hooks.
+    try {
+      this.ui.registerCustomPanelType(AUTO_TITLE_PANEL_TYPE, (panel) => {
+        try { if (panel.setTitle) panel.setTitle('Templater · Auto-title rules'); } catch (e) {}
+        const root = panel.getElement();
+        if (!root) return;
+        this._state.autoTitlePanelRoots.add(root);
+        plugin.renderAutoTitleRulesPanel(root);
+      });
+      const atcmd = this.ui.addCommandPaletteCommand({ label: "Templater: Auto-title rules…", icon: "ti-heading", onSelected: () => plugin.openAutoTitleRulesPanel() });
+      if (atcmd && atcmd.remove) this._state.disposers.push(() => { try { atcmd.remove(); } catch (e) {} });
+    } catch (e) { console.warn('[Templater] Auto-title rules UI failed:', e); }
     // AI-title command — title the open note from a 4-6 word AI summary of its body (needs the /llm proxy)
     try {
       const acmd = this.ui.addCommandPaletteCommand({ label: "Templater: AI title this note", icon: "ti-wand", onSelected: () => plugin.aiTitleActive() });
@@ -620,21 +731,25 @@ class Plugin extends AppPlugin {
     let pinned = await this.resolveTargetCollection(triggers, null);
     if (!pinned && vars.collection) { try { pinned = await this.collectionByName(String(vars.collection)); } catch (e) {} }
 
+    const applyContext = this._recordApplyContext(activeRecord);
+
     // TP-19: SCHEMA FORM mode — a pinned template with Variables JSON {"form": true} shows ONE
     // typed form rendered from the collection schema (date pickers / choice dropdowns / record
     // pickers / number) instead of chained {{prompt}} dialogs. (Create-new only; opt-in per template.)
-    if (vars.form && pinned) { try { await this.applySchemaForm(template, pinned, content, vars); } catch (e) { console.warn('[Templater] schema form failed', e); this.toast('Templater', 'Schema form error: ' + (e && e.message || e)); } return; }
+    // Journal fill must win even when Daily Note was authored as a schema-form create template.
+    if (vars.form && pinned && !applyContext.isJournal) { try { await this.applySchemaForm(template, pinned, content, vars); } catch (e) { console.warn('[Templater] schema form failed', e); this.toast('Templater', 'Schema form error: ' + (e && e.message || e)); } return; }
 
-    // TP-13: runtime "fill the OPEN record vs create new" chooser. If a real (non-Journal)
-    // record is open, offer to fill it in place; otherwise go straight to create as before.
-    let journalish = false;
-    try { journalish = !!(activeRecord && activeRecord.getJournalDetails && activeRecord.getJournalDetails()); } catch (e) {}
-    if (activeRecord && !journalish) {
+    // TP-13/v2.46: every open record — including a synthetic Journal day record — enters the
+    // fill-vs-create chooser. Journal used to be explicitly excluded here, which silently sent a
+    // pinned Daily Note template down the create-in-Notes path even though getActiveRecord worked.
+    if (applyContext.hasRecord) {
       const activeName = (activeRecord.getName && activeRecord.getName()) || 'current record';
       const pinName = pinned && pinned.getName && pinned.getName();
       const activeCollName = activeCollection && activeCollection.getName && activeCollection.getName();
-      const mismatch = !!(pinName && activeCollName && pinName !== activeCollName);
-      const mode = await this.chooseApplyTarget(this.tName(template), activeName, pinName, mismatch);
+      // A Journal page is a valid fill target regardless of the template's create collection.
+      // Keep Fill first/default; Create remains an explicit alternative.
+      const mismatch = !applyContext.isJournal && !!(pinName && activeCollName && pinName !== activeCollName);
+      const mode = await this.chooseApplyTarget(this.tName(template), activeName, pinName, mismatch, applyContext.isJournal);
       if (mode == null) return;                       // dismissed -> no-op
       if (mode === 'append' || mode === 'update') { proceed(null, mode); return; }
       // mode === 'create' falls through to the create flow below.
@@ -650,13 +765,31 @@ class Plugin extends AppPlugin {
   // Thin wrapper over the existing asyncSuggester modal (arrow-key + click + Esc -> -1). First option is
   // the safe default. When the template is pinned to a DIFFERENT collection than the open record, lead
   // with Create so we never silently rewrite a record of the wrong type.
-  async chooseApplyTarget(templateName, recordName, pinnedCollName, mismatch) {
-    const fill   = { k: 'update', l: 'Fill this record — set properties, replace title (' + recordName + ')' };
+  _recordApplyContext(record) {
+    let isJournal = false;
+    try { isJournal = !!(record && record.getJournalDetails && record.getJournalDetails()); } catch (e) {}
+    return { hasRecord: !!record, isJournal };
+  }
+
+  _removeJournalTitleFields(frontmatter) {
+    if (!frontmatter || typeof frontmatter !== 'object') return frontmatter;
+    for (const key of Object.keys(frontmatter)) if (/^(title|name)$/i.test(key)) delete frontmatter[key];
+    return frontmatter;
+  }
+
+  _applyTargetOptions(recordName, pinnedCollName, mismatch, isJournal) {
+    const fill   = { k: 'update', l: isJournal
+      ? ('Fill this journal page — keep date title (' + recordName + ')')
+      : ('Fill this record — set properties, replace title (' + recordName + ')') };
     const append = { k: 'append', l: 'Append to this record — keep title, add below' };
     const create = { k: 'create', l: mismatch
       ? ('Create a NEW record in "' + pinnedCollName + '" instead')
       : (pinnedCollName ? ('Create a NEW record in "' + pinnedCollName + '"') : 'Create a NEW record') };
-    const opts = mismatch ? [create, fill, append] : [fill, append, create];
+    return mismatch && !isJournal ? [create, fill, append] : [fill, append, create];
+  }
+
+  async chooseApplyTarget(templateName, recordName, pinnedCollName, mismatch, isJournal) {
+    const opts = this._applyTargetOptions(recordName, pinnedCollName, mismatch, isJournal);
     const idx = await this.asyncSuggester('Apply "' + templateName + '"', opts.map(o => o.l));
     if (idx < 0 || !opts[idx]) return null;
     return opts[idx].k;
@@ -682,6 +815,276 @@ class Plugin extends AppPlugin {
         });
       }
     }).catch(e => console.warn('[Templater] collection picker failed:', e));
+  }
+
+  // ========================================================================
+  // Auto-title rules (v2.46) — canonical global config + optional collection hook
+  // ========================================================================
+
+  _autoTitleRules() {
+    try {
+      const conf = this.getConfiguration && this.getConfiguration();
+      const custom = conf && conf.custom && typeof conf.custom === 'object' ? conf.custom : {};
+      const rules = custom[AUTO_TITLE_RULES_KEY];
+      return rules && typeof rules === 'object' && !Array.isArray(rules) ? rules : {};
+    } catch (e) { return {}; }
+  }
+
+  _autoTitleRuleForCollection(collection) {
+    if (!collection) return null;
+    const rules = this._autoTitleRules();
+    let guid = '', name = '';
+    try { guid = collection.getGuid ? collection.getGuid() : ''; } catch (e) {}
+    try { name = collection.getName ? collection.getName() : ''; } catch (e) {}
+    const direct = guid && rules[guid];
+    if (direct && typeof direct === 'object' && direct.template) return direct;
+    // Name fallback keeps a rule usable if an export/import changed collection GUIDs.
+    for (const key of Object.keys(rules)) {
+      const rule = rules[key];
+      if (rule && rule.collectionName === name && rule.template) return rule;
+    }
+    return null;
+  }
+
+  async applyAutoTitleRule(record, collection) {
+    const rule = this._autoTitleRuleForCollection(collection);
+    if (!rule || !rule.template) return null;
+    const title = renderTemplaterAutoTitle(record, rule.template, rule, true).trim();
+    if (!title) return null;
+    let current = ''; try { current = (record.getName && record.getName()) || ''; } catch (e) {}
+    if (title === current.trim()) return title;
+    return (await this.trySetRecordTitle(record, title)) ? title : null;
+  }
+
+  async _ownConfigApi() {
+    if (typeof this.saveConfiguration === 'function') return this;
+    try {
+      const all = this.data && this.data.getAllGlobalPlugins ? await this.data.getAllGlobalPlugins() : [];
+      const mine = (all || []).find(p => p && p.getName && p.getName() === 'Templater');
+      if (mine && typeof mine.saveConfiguration === 'function') return mine;
+    } catch (e) {}
+    return null;
+  }
+
+  async _saveAutoTitleRules(rules) {
+    const api = await this._ownConfigApi();
+    if (!api) throw new Error('Templater configuration is not writable on this Thymer build.');
+    const current = (api.getConfiguration && api.getConfiguration()) || (this.getConfiguration && this.getConfiguration()) || {};
+    const custom = current.custom && typeof current.custom === 'object' ? current.custom : {};
+    await api.saveConfiguration(Object.assign({}, current, {
+      version: '2.46.0',
+      custom: Object.assign({}, custom, { [AUTO_TITLE_RULES_KEY]: rules })
+    }));
+  }
+
+  async openAutoTitleRulesPanel() {
+    try {
+      const active = this.ui.getActivePanel && this.ui.getActivePanel();
+      const panel = await this.ui.createPanel(active ? { afterPanel: active } : undefined);
+      if (panel) await panel.navigateToCustomType(AUTO_TITLE_PANEL_TYPE);
+    } catch (e) { this.toast('Templater', 'Could not open Auto-title rules: ' + (e && e.message || e)); }
+  }
+
+  async renderAutoTitleRulesPanel(root) {
+    root.classList.add('tmpl-auto-title-panel');
+    root.textContent = 'Loading collections…';
+    let collections = [];
+    try { collections = await this.data.getAllCollections(); } catch (e) {}
+    collections = (collections || []).filter(c => {
+      try { const n = c.getName && c.getName(); return n && n !== TEMPLATES_COLL && !AUDIT_COLL_CANDIDATES.includes(n); } catch (e) { return false; }
+    }).sort((a, b) => (a.getName() || '').localeCompare(b.getName() || ''));
+    if (!root.isConnected) return;
+    root.replaceChildren();
+
+    const title = document.createElement('h2'); title.textContent = 'Auto-title rules'; root.appendChild(title);
+    const intro = document.createElement('p'); intro.className = 'tmpl-auto-title-help';
+    intro.textContent = 'Build real titles after Templater fills properties. Optional live mode installs a marked, removable display-only hook in that collection plugin.';
+    root.appendChild(intro);
+    if (!collections.length) { const empty = document.createElement('p'); empty.textContent = 'No collections available.'; root.appendChild(empty); return; }
+
+    const selectLabel = document.createElement('label'); selectLabel.className = 'tmpl-auto-title-label'; selectLabel.textContent = 'Collection'; root.appendChild(selectLabel);
+    const collSelect = document.createElement('select'); collSelect.className = 'tmpl-auto-title-input';
+    collections.forEach(c => { const o = document.createElement('option'); o.value = c.getGuid(); o.textContent = c.getName(); collSelect.appendChild(o); });
+    root.appendChild(collSelect);
+
+    const editor = document.createElement('div'); editor.className = 'tmpl-auto-title-editor'; root.appendChild(editor);
+    const status = document.createElement('div'); status.className = 'tmpl-auto-title-status'; root.appendChild(status);
+    const setStatus = (message, error) => { status.textContent = message || ''; status.classList.toggle('is-error', !!error); };
+
+    const renderEditor = async () => {
+      editor.replaceChildren(); setStatus('', false);
+      const collection = collections.find(c => c.getGuid() === collSelect.value) || collections[0];
+      if (!collection) return;
+      const existingRule = this._autoTitleRuleForCollection(collection) || {};
+      let fields = [];
+      try { const cfg = collection.getConfiguration && collection.getConfiguration(); fields = cfg && Array.isArray(cfg.fields) ? cfg.fields : []; } catch (e) {}
+
+      const ruleLabel = document.createElement('label'); ruleLabel.className = 'tmpl-auto-title-label'; ruleLabel.textContent = 'Title rule'; editor.appendChild(ruleLabel);
+      const ruleInput = document.createElement('input'); ruleInput.className = 'tmpl-auto-title-input'; ruleInput.type = 'text'; ruleInput.spellcheck = false;
+      ruleInput.placeholder = '{field:status}?{ · {field:owner}}'; ruleInput.value = existingRule.template || ''; this.attachInputGuards(ruleInput); editor.appendChild(ruleInput);
+
+      const syntax = document.createElement('div'); syntax.className = 'tmpl-auto-title-help';
+      syntax.textContent = '{name} = current stored title · {field:FIELD_ID} = property · ?{ … } = include only when a property has a value · \\{ = literal brace'; editor.appendChild(syntax);
+
+      const chips = document.createElement('div'); chips.className = 'tmpl-auto-title-chips'; editor.appendChild(chips);
+      const insert = (token) => {
+        const start = Number.isFinite(ruleInput.selectionStart) ? ruleInput.selectionStart : ruleInput.value.length;
+        const end = Number.isFinite(ruleInput.selectionEnd) ? ruleInput.selectionEnd : start;
+        ruleInput.value = ruleInput.value.slice(0, start) + token + ruleInput.value.slice(end);
+        ruleInput.focus(); try { ruleInput.setSelectionRange(start + token.length, start + token.length); } catch (e) {}
+      };
+      const addChip = (label, token, icon) => {
+        const b = document.createElement('button'); b.className = 'tmpl-auto-title-chip'; b.type = 'button'; b.textContent = (icon ? icon + ' ' : '') + label;
+        b.title = token; b.onclick = () => insert(token); chips.appendChild(b);
+      };
+      addChip('Name', '{name}', 'Aa');
+      addChip('Optional group', '?{}', '…');
+      for (const f of fields) {
+        if (!f || !f.id || !f.label || /^(title|name)$/i.test(f.label)) continue;
+        addChip(f.label, '{field:' + f.id + '}', '');
+      }
+
+      const liveRow = document.createElement('label'); liveRow.className = 'tmpl-auto-title-live';
+      const live = document.createElement('input'); live.type = 'checkbox'; live.checked = existingRule.live === true;
+      liveRow.appendChild(live); liveRow.appendChild(document.createTextNode(' Display-only live mode (managed customizeRecordTitle hook)')); editor.appendChild(liveRow);
+      const liveNote = document.createElement('div'); liveNote.className = 'tmpl-auto-title-help';
+      liveNote.textContent = 'For live mode, property-only rules are safest. A rule containing {name} is still applied as a real title, but the live hook stays neutral to prevent repeated title expansion.'; editor.appendChild(liveNote);
+
+      const actions = document.createElement('div'); actions.className = 'tmpl-auto-title-actions'; editor.appendChild(actions);
+      const save = document.createElement('button'); save.className = 'tmpl-btn primary'; save.textContent = 'Save rule'; actions.appendChild(save);
+      const removeHook = document.createElement('button'); removeHook.className = 'tmpl-btn'; removeHook.textContent = 'Remove title hook'; actions.appendChild(removeHook);
+      const deleteRule = document.createElement('button'); deleteRule.className = 'tmpl-btn'; deleteRule.textContent = 'Delete rule'; actions.appendChild(deleteRule);
+
+      save.onclick = async () => {
+        const template = ruleInput.value.trim();
+        if (!template) { setStatus('Enter a title rule first.', true); return; }
+        save.disabled = removeHook.disabled = deleteRule.disabled = true; setStatus('Saving…', false);
+        const rules = Object.assign({}, this._autoTitleRules());
+        let liveSaved = !!live.checked, hookMessage = '';
+        try {
+          if (liveSaved) {
+            const hook = await this._installAutoTitleHook(collection, { template, multiValueSeparator: ', ', normalizeWhitespace: true });
+            if (!hook.ok) { liveSaved = false; hookMessage = ' Rule saved, but live hook was not installed: ' + hook.message; }
+          } else {
+            const removed = await this._removeAutoTitleHook(collection);
+            if (!removed.ok) hookMessage = ' Rule saved; hook removal failed: ' + removed.message;
+          }
+          rules[collection.getGuid()] = { collectionName: collection.getName(), template, live: liveSaved, multiValueSeparator: ', ', normalizeWhitespace: true };
+          await this._saveAutoTitleRules(rules);
+          setStatus('Saved for ' + collection.getName() + '.' + hookMessage, !!hookMessage);
+        } catch (e) { setStatus('Could not save: ' + (e && e.message || e), true); }
+        save.disabled = removeHook.disabled = deleteRule.disabled = false;
+      };
+      removeHook.onclick = async () => {
+        save.disabled = removeHook.disabled = deleteRule.disabled = true; setStatus('Removing managed hook…', false);
+        try {
+          const result = await this._removeAutoTitleHook(collection);
+          if (!result.ok) throw new Error(result.message);
+          const rules = Object.assign({}, this._autoTitleRules());
+          if (rules[collection.getGuid()]) rules[collection.getGuid()] = Object.assign({}, rules[collection.getGuid()], { live: false });
+          await this._saveAutoTitleRules(rules);
+          live.checked = false; setStatus(result.changed ? 'Title hook removed. Apply-time rule kept.' : 'No Templater title hook was installed.', false);
+        } catch (e) { setStatus('Could not remove hook: ' + (e && e.message || e), true); }
+        save.disabled = removeHook.disabled = deleteRule.disabled = false;
+      };
+      deleteRule.onclick = async () => {
+        save.disabled = removeHook.disabled = deleteRule.disabled = true; setStatus('Deleting rule…', false);
+        try {
+          const removed = await this._removeAutoTitleHook(collection); if (!removed.ok) throw new Error(removed.message);
+          const rules = Object.assign({}, this._autoTitleRules()); delete rules[collection.getGuid()];
+          await this._saveAutoTitleRules(rules); ruleInput.value = ''; live.checked = false; setStatus('Rule and managed hook removed.', false);
+        } catch (e) { setStatus('Could not delete: ' + (e && e.message || e), true); }
+        save.disabled = removeHook.disabled = deleteRule.disabled = false;
+      };
+    };
+    collSelect.onchange = () => { renderEditor().catch(e => setStatus(String(e), true)); };
+    await renderEditor();
+  }
+
+  _autoTitleManagedBlock(rule, includeStub) {
+    const safeRule = JSON.stringify({
+      template: String(rule.template || ''),
+      multiValueSeparator: typeof rule.multiValueSeparator === 'string' ? rule.multiValueSeparator : ', ',
+      normalizeWhitespace: rule.normalizeWhitespace !== false,
+    }).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+    // Hook mechanism and marker convention adopted from akaready/thymer-build-title-from-properties.
+    return AUTO_TITLE_HOOK_START + "\n" + (includeStub ? (AUTO_TITLE_STUB + "\n") : '') +
+`(function () {
+\ttry {
+\t\tif (typeof Plugin === 'undefined' || !Plugin || !Plugin.prototype) return;
+\t\tvar __proto = Plugin.prototype;
+\t\tvar __prev = __proto.onLoad;
+\t\tif (typeof __prev !== 'function') return;
+\t\t__proto.onLoad = function () {
+\t\t\t__prev.call(this);
+\t\t\ttry {
+\t\t\t\tvar __rule = ${safeRule};
+\t\t\t\tthis.customizeRecordTitle(function (a) {
+\t\t\t\t\tif (/(^|[^\\\\])\\{\\s*(name|title)\\s*\\}/.test(__rule.template)) return null;
+\t\t\t\t\tvar __title = renderTemplaterAutoTitle(a && a.record, __rule.template, __rule, false);
+\t\t\t\t\treturn __title || null;
+\t\t\t\t});
+\t\t\t} catch (e) {}
+\t\t};
+\t} catch (e) {}
+})();
+${renderTemplaterAutoTitle.toString()}
+` + AUTO_TITLE_HOOK_END;
+  }
+
+  _replaceAutoTitleManagedBlock(code, block) {
+    const text = String(code);
+    const start = text.indexOf(AUTO_TITLE_HOOK_START), end = text.indexOf(AUTO_TITLE_HOOK_END);
+    if (start >= 0 && end > start) return text.slice(0, start) + block + text.slice(end + AUTO_TITLE_HOOK_END.length);
+    // Exactly one separator newline belongs to the managed insertion and is removed with it.
+    return text + '\n' + block;
+  }
+
+  _stripAutoTitleManagedBlock(code) {
+    let text = String(code);
+    const start = text.indexOf(AUTO_TITLE_HOOK_START), end = text.indexOf(AUTO_TITLE_HOOK_END);
+    if (start < 0 || end <= start) return { code: text, changed: false };
+    const ownedStart = start > 0 && text[start - 1] === '\n' ? start - 1 : start;
+    text = text.slice(0, ownedStart) + text.slice(end + AUTO_TITLE_HOOK_END.length);
+    // Remove only our exact marked stub; no unmarked collection code is rewritten.
+    const stubAt = text.indexOf(AUTO_TITLE_STUB);
+    if (stubAt >= 0) text = text.slice(0, stubAt) + text.slice(stubAt + AUTO_TITLE_STUB.length);
+    return { code: text, changed: true };
+  }
+
+  _assertAutoTitleCollectionCode(code) {
+    try { new Function(String(code)); } catch (e) { return { ok: false, message: 'generated collection code would not parse: ' + (e && e.message || e) }; }
+    if (!/\bclass\s+Plugin\b|\bvar\s+Plugin\s*=|\bPlugin\s*=\s*class\b/.test(String(code))) return { ok: false, message: 'collection code declares no Plugin class' };
+    return { ok: true };
+  }
+
+  async _readCollectionPlugin(collection) {
+    if (!collection || typeof collection.getExistingCodeAndConfig !== 'function') return { ok: false, message: 'collection plugin code cannot be read on this Thymer build' };
+    let existing;
+    try { existing = await collection.getExistingCodeAndConfig(); } catch (e) { return { ok: false, message: 'collection plugin code could not be read' }; }
+    if (!existing || typeof existing.code !== 'string') return { ok: false, message: 'collection plugin returned no readable code' };
+    if (typeof collection.savePlugin !== 'function') return { ok: false, message: 'collection plugin code is not writable on this Thymer build' };
+    const json = existing.json && typeof existing.json === 'object' ? existing.json : (collection.getConfiguration ? collection.getConfiguration() : null);
+    if (!json || typeof json !== 'object') return { ok: false, message: 'collection plugin configuration could not be read' };
+    return { ok: true, code: existing.code, json };
+  }
+
+  async _installAutoTitleHook(collection, rule) {
+    const existing = await this._readCollectionPlugin(collection); if (!existing.ok) return existing;
+    const hasOwner = /\bclass\s+Plugin\b|\bvar\s+Plugin\s*=|\bPlugin\s*=\s*class\b/.test(existing.code);
+    const next = this._replaceAutoTitleManagedBlock(existing.code, this._autoTitleManagedBlock(rule, !hasOwner));
+    const safe = this._assertAutoTitleCollectionCode(next); if (!safe.ok) return safe;
+    try { const ok = await collection.savePlugin(existing.json, next); return ok ? { ok: true, changed: next !== existing.code } : { ok: false, message: 'Thymer rejected the collection plugin save' }; }
+    catch (e) { return { ok: false, message: e && e.message || String(e) }; }
+  }
+
+  async _removeAutoTitleHook(collection) {
+    const existing = await this._readCollectionPlugin(collection); if (!existing.ok) return existing;
+    const stripped = this._stripAutoTitleManagedBlock(existing.code);
+    if (!stripped.changed) return { ok: true, changed: false };
+    // Removal is intentionally surgical: only our exact markers/stub are deleted.
+    try { const ok = await collection.savePlugin(existing.json, stripped.code); return ok ? { ok: true, changed: true } : { ok: false, message: 'Thymer rejected the collection plugin save' }; }
+    catch (e) { return { ok: false, message: e && e.message || String(e) }; }
   }
 
   // ========================================================================
@@ -1721,6 +2124,9 @@ class Plugin extends AppPlugin {
           }
         } catch (_) {}
       }
+      let finalTitle = title;
+      try { const ruled = await this.applyAutoTitleRule(rec, collection); if (ruled) finalTitle = ruled; }
+      catch (e) { console.warn('[Templater] schema-form Auto-title rule failed', e); }
       // Write the BODY (already rendered above; frontmatter + directive markers stripped).
       const wantPromote = /<!--PLEXUS-PROMOTE-->/i.test(parsedSF.body || '');
       try {
@@ -1729,8 +2135,8 @@ class Plugin extends AppPlugin {
       } catch (e) { console.warn('[Templater] schema-form body write failed', e); }
       if (wantPromote) this._promoteAfterApply(rec);
       try { const p = template.prop && template.prop(F_LASTUSED); if (p && p.setFromDate) p.setFromDate(new Date()); } catch (_) {}
-      this.writeAuditRow(template, rec.guid, collection, title, '(schema form)').catch(() => {});
-      this.toast('Applied: ' + this.tName(template), 'Created "' + title + '" in ' + (collection.getName ? collection.getName() : ''));
+      this.writeAuditRow(template, rec.guid, collection, finalTitle, '(schema form)').catch(() => {});
+      this.toast('Applied: ' + this.tName(template), 'Created "' + finalTitle + '" in ' + (collection.getName ? collection.getName() : ''));
       try { const np = this.ui.getActivePanel && this.ui.getActivePanel(); if (np && np.navigateTo) await np.navigateTo({ itemGuid: guid, highlight: true }); } catch (_) {}
     });
   }
@@ -2441,6 +2847,7 @@ class Plugin extends AppPlugin {
     let targetCollection = null;
     let createdNewGuid = null;
     let bodyForWrite = bodyAll;
+    let targetIsJournal = false;
 
     if (appendMode || updateMode || mergeMode) {
       // 10X-#8/#9: merge (and migration) can target a record by guid, headless — else the active one.
@@ -2449,6 +2856,7 @@ class Plugin extends AppPlugin {
       if (!tr) { this.toast("Templater", "No target record — open a record first."); return; }
       targetRecord = tr;
       targetCollection = (opts && opts.recordGuid) ? null : activeCollection;
+      targetIsJournal = this._recordApplyContext(targetRecord).isJournal;
       if (mergeMode) {
         // props: fill EMPTY only (never overwrite user values, never rename)
         if (frontmatter) {
@@ -2483,9 +2891,11 @@ class Plugin extends AppPlugin {
       // Update-mode rename: PluginRecord has no setName. Only a Name/Title text PROPERTY
       // can be written; if none exists, update-mode cannot rename — we skip silently.
       // When update-mode sets the title, drop the title line from the body too (it now lives
-      // as the record name). Append-mode keeps it (the record's own name is left untouched).
+      // as the record name). Journal day titles are host-owned dates: never write them, but still
+      // consume a body-derived title line so "Daily Note" does not become a stray first bullet.
+      // Append-mode keeps it (the record's own name is left untouched).
       if (updateMode) {
-        await this.trySetRecordTitle(targetRecord, title);
+        if (!targetIsJournal) await this.trySetRecordTitle(targetRecord, title);
         if (dropTitleLine) bodyForWrite = this.stripTitleLine(bodyAll, titleLineRaw);
       }
     } else {
@@ -2498,13 +2908,28 @@ class Plugin extends AppPlugin {
       if (!createdNewGuid) throw new Error("createRecord returned no GUID");
       targetRecord = await this.pollRecord(createdNewGuid);
       if (!targetRecord) throw new Error("Could not fetch new record after createRecord");
+      targetIsJournal = this._recordApplyContext(targetRecord).isJournal;
       // Drop the title line from the body only when the title CAME from the first body line.
       if (dropTitleLine) bodyForWrite = this.stripTitleLine(bodyAll, titleLineRaw);
     }
 
+    // Journal date titles are host-owned. Frontmatter Title/Name would otherwise reach the same
+    // writable property path as trySetRecordTitle and rename the day despite the guard above.
+    if (targetIsJournal) this._removeJournalTitleFields(frontmatter);
+
     // Frontmatter -> properties (CORE).
     if (frontmatter && Object.keys(frontmatter).length) {
       await this.applyFrontmatter(targetRecord, frontmatter);
+    }
+
+    // v2.46 Auto-title rules: after frontmatter lands, compute a REAL title from the target
+    // collection's canonical Templater rule. Applies to create/fill, never append/merge, and never
+    // to host-owned Journal date titles. The optional collection hook below is display-only.
+    if (!targetIsJournal && (createdNewGuid || updateMode) && targetCollection) {
+      try {
+        const ruledTitle = await this.applyAutoTitleRule(targetRecord, targetCollection);
+        if (ruledTitle) title = ruledTitle;
+      } catch (e) { console.warn('[Templater] Auto-title rule apply failed:', e); }
     }
 
     // Body -> native nested line items (segment-aware). Strip the directive markers first (not content).
@@ -2515,6 +2940,8 @@ class Plugin extends AppPlugin {
     bodyForWrite = bodyForWrite.replace(/<!--PLEXUS-PROMOTE-->/gi, '');
     let cursorGuid = null;
     if (bodyForWrite.trim()) {
+      // createLineItem(null, null, ...) prepends the first root line, so a Journal fill lands at
+      // the page top; writeBody then chains siblings in author order beneath that first line.
       cursorGuid = await this.writeBody(targetRecord, bodyForWrite, { flat: vars && vars.nest === 'flat' }); // TP-3: {{cursor}} target line
     }
     if (wantPromote) this._promoteAfterApply(targetRecord);
@@ -3715,11 +4142,13 @@ class Plugin extends AppPlugin {
       if (!vars.defaults) vars.defaults = {};
       const rendered = await this.renderTemplate(content, { record, collection: targetCollection, prompts: {}, vars: vars.defaults, empty: vars.empty || 'skip', templateName: this.tName(tmpl) });
       const parsed = this.parseFrontmatter(rendered);
+      const targetIsJournal = this._recordApplyContext(record).isJournal;
       // Trigger/schedule renders run with NO prompt answers, so an interactive template's frontmatter
       // (e.g. `Title: {{prompt:Type}} · {{prompt:Title}}`) collapses to dangling separators (" · ").
       // Clean each value the way the manual title path does and DROP any that reduce to empty — so an
       // auto-applied template lays down a clean SCAFFOLD instead of clobbering the title with junk.
       if (parsed.frontmatter) parsed.frontmatter = this._cleanAutoFrontmatter(parsed.frontmatter);
+      if (targetIsJournal) this._removeJournalTitleFields(parsed.frontmatter);
       const wantPromote = /<!--PLEXUS-PROMOTE-->/i.test(parsed.body || '');
       const originalBody = (parsed.body || '').replace(/<!--PLEXUS-PROMOTE-->/gi, '');
       // Append triggers are resumable and idempotent at the section boundary.
@@ -3729,6 +4158,9 @@ class Plugin extends AppPlugin {
       const body = mode === 'append' ? await this._mergeFilterBody(record, originalBody) : originalBody;
       if (mode === 'append' && !body.trim()) { this.stampLastFired(tmpl); return false; }
       if (mode !== 'append' && parsed.frontmatter && Object.keys(parsed.frontmatter).length) { try { await this.applyFrontmatter(record, parsed.frontmatter); } catch (e) {} }
+      if (!targetIsJournal && (mode === 'create' || mode === 'update') && targetCollection) {
+        try { await this.applyAutoTitleRule(record, targetCollection); } catch (e) { console.warn('[Templater] trigger Auto-title rule failed', e); }
+      }
       if (body.trim()) await this.writeBody(record, body, { flat: vars && vars.nest === 'flat' });
       if (wantPromote) this._promoteAfterApply(record);
       try { const p = tmpl.prop && tmpl.prop(F_LASTUSED); if (p && p.setFromDate) p.setFromDate(new Date()); } catch (e) {}

@@ -2,7 +2,7 @@
 
 A Thymer **global AppPlugin** that turns saved template records into fully-formed Thymer records — title, typed properties, and native nested body — in one keystroke. Pick a template, answer any prompts, and Templater renders the tokens and applies the result to a new or existing record. Templates can also **auto-apply** when you create a record, run on a **schedule**, and be edited through a **form dialog** with autocomplete.
 
-**v2.45.2:** scheduled appends now settle one host-synced pre-due claim before writing. This closes the Desktop-versus-browser race that Web Locks and localStorage cannot coordinate, while leaving a crashed claim retryable and keeping the wait entirely off the editor's main interaction path.
+**v2.46.0:** applying a template while a Journal day is open now defaults to **Fill this journal page** instead of creating a record in the template's pinned collection. Journal date titles remain host-owned; template properties are applied when compatible and the body is inserted at the page top. This release also adds per-collection **Auto-title rules** with real apply-time titles and an optional removable display-only live hook.
 
 Templates live in the **Templates** collection — one record per template. The body can be authored as the template record's own nested outline (WYSIWYG) or as a markdown block in the `Template Content` text property; the short `---` frontmatter (which sets the new record's properties) lives in `Template Content`.
 
@@ -20,6 +20,7 @@ Templates live in the **Templates** collection — one record per template. The 
 
 - **Fills a new record in** — the target collection.
 - **Properties set on create** — one row per frontmatter property: pick a property from the target collection's schema, choose how it fills (**Prompt / Choice / Date / Record (one) / Records (many) / Static**), set the value. `+ add property` to add more. Composite/odd values load as **Static** (verbatim, lossless).
+- **Auto-title rules** — open `Templater: Auto-title rules…`, choose a collection, then compose a real title from property chips. Rules live in Templater's own `custom.autoTitleRules` config and run after frontmatter is applied on create/fill.
 - **Body** — a markdown textarea (full control) with a **storage toggle**: *Native outline* (the body is the template record's own line items — editable here **and** in the normal doc) or *Text* (stored in `Template Content`). The body is only rebuilt when you change it.
 - **Auto-apply** checkbox → sets `Trigger On: record.created:<collection>`.
 - **Auto Title** (Off/On) + **Title Pattern**.
@@ -158,6 +159,14 @@ A small JSON object on each template:
 ## Spine (`window.__templater`)
 
 For cross-plugin use (e.g. Quick Add): `render(content, prompts)`, `renderTemplateByName(name, prompts)`, `applyTemplateByName(name, {prompts, mode, collection})`, `runTrigger`, `checkSchedulesNow`, `composeTitle`, `autoTitleByGuid(guid, collName)`, `_instance` (debug). MCP `update_plugin_code` does NOT reach the web client — deploy via the Plugins Manager.
+
+### Auto-title rule syntax and live mode
+
+Auto-title rules use `{name}` for the current stored title and `{field:FIELD_ID}` for a collection property. Wrap separators and fields in `?{ ... }` when the whole group should disappear if its property is empty; escape literal braces with `\{` and `\}`.
+
+The optional live mode installs a clearly marked `Templater Auto-title: managed collection hook` block that wraps the collection plugin's existing `Plugin.prototype.onLoad`, calls it first, then registers `customizeRecordTitle()`. `Remove title hook` deletes only Templater's marked block (and its exact managed stub when Templater added one); unmarked collection code is never rewritten. Templater refuses installation when it cannot read the collection's existing code/config or when the generated result fails validation.
+
+The managed-hook mechanism, token grammar, and property-chip settings approach were adapted from [akaready/thymer-build-title-from-properties](https://github.com/akaready/thymer-build-title-from-properties). Templater keeps its own real-title apply path; rich display formatting and telemetry from the reference plugin were intentionally not adopted.
 
 ## Data model
 
