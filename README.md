@@ -2,7 +2,7 @@
 
 A Thymer **global AppPlugin** that turns saved template records into fully-formed Thymer records — title, typed properties, and native nested body — in one keystroke. Pick a template, answer any prompts, and Templater renders the tokens and applies the result to a new or existing record. Templates can also **auto-apply** when you create a record, run on a **schedule**, and be edited through a **form dialog** with autocomplete.
 
-**v2.47.0:** adds Journal-chain/carry tokens, numbered cursor stops, date/suggester prompts, per-collection default templates, a side-by-side dry preview in the picker, and the Roam-style `;;` inline insertion trigger.
+**v2.48.0:** makes `;;` a live, caret-anchored picker and adds collection-free inline Snippets. v2.47's Journal-chain/carry tokens, numbered cursor stops, date/suggester prompts, defaults, and dry preview remain available.
 
 Templates live in the **Templates** collection — one record per template. The body can be authored as the template record's own nested outline (WYSIWYG) or as a markdown block in the `Template Content` text property; the short `---` frontmatter (which sets the new record's properties) lives in `Template Content`.
 
@@ -10,7 +10,7 @@ Templates live in the **Templates** collection — one record per template. The 
 
 - **Cmd+K → "Apply Template…"** — pick a template, answer prompts, confirm. Creates/updates the target record and navigates to it.
 - **Inline `/tmpl`** — in any line, type `/tmpl` to open the picker or `/tmpl <name>` to jump to one; applied in place per its Triggers.
-- **Inline `;;`** — type `;;query` at the end of any line to fuzzy-search and insert a template at that exact block position. `;;;` escapes to literal `;;`; change or disable it in **Templater: Settings…**.
+- **Inline `;;`** — type `;;query` anywhere in a line to open a live, fuzzy-filtered caret popup and insert at that exact position. `;;;` escapes to literal `;;`; change, disable, or switch to settled fallback mode in **Templater: Settings…**.
 - **Cmd+K → "Templater: Edit template…"** — the form editor (below). Edits the active Templates record, else prompts you to pick one.
 - **Auto-apply** — make a new record in a collection that has a template with `Trigger On: record.created:<Collection>` and the body/props are scaffolded automatically (silent, no prompts).
 - **Schedule** — a template with a `Schedule` (e.g. `06:00 daily`) + `Target` (e.g. `journal:today`) fires on its own.
@@ -177,9 +177,17 @@ A small JSON object on each template:
 
 ## Per-collection defaults
 
-Open **Templater: Settings…** and map a collection to a template. A local, newly-created record receives that template headlessly only when it has no body content and no `record.created` trigger claims the collection. Records created by Templater are transiently guarded so a default cannot recursively fire. Settings are stored in `custom.collectionDefaults`; the same panel controls `custom.inlineTrigger` (`;;` by default, `false` when disabled).
+Open **Templater: Settings…** and map a collection to a template. A local, newly-created record receives that template headlessly only when it has no body content and no `record.created` trigger claims the collection. Records created by Templater are transiently guarded so a default cannot recursively fire. Settings are stored in `custom.collectionDefaults`; the same panel controls `custom.inlineTrigger` (`;;` by default, `false` when disabled) and `custom.inlineLive` (default `true`).
 
-In `;;` anchor mode, body blocks are inserted as siblings immediately after the trigger line. An empty trigger line is reused as the first template line. Title/frontmatter/banner/relation directives are skipped; Escape in the picker restores the original `;;query` text.
+## Snippets & the `;;` popup
+
+Type `;;` anywhere in an editor line. A RefX-style popup opens at Thymer's real model caret immediately; keep typing to fuzzy-filter, use Up/Down, then Enter or Tab to insert. Escape or clicking elsewhere dismisses the popup and leaves `;;query` untouched. Typing `;;;` produces a literal `;;`. If live mode is disabled or its listener cannot initialize, the prior settled-line picker remains the fallback.
+
+Templates whose **Type** choice is **Snippet** appear first with a `✂` marker. Snippets are collection-free and body-only: they never enter record create/fill flows, ask for a target collection, apply frontmatter/properties, or run banner/relation directives. Prompt tokens still open their normal modal before insertion. Use **Templater: New snippet from selection** to capture the current text selection, or the active line when nothing is selected.
+
+A single rendered body line is spliced into the trigger line as native segments, preserving both prefix and suffix text. Multi-line bodies retain v2.47 anchor mode: the trigger text is removed, the surrounding line is kept, and blocks are inserted immediately after it (an otherwise-empty trigger line may be reused for the first block). `{{cursor}}` stops work in both forms.
+
+The global Templater plugin does not own the Templates collection's `plugin.json`, so it must not declare collection fields in this repository. On the first snippet save it preserves the full Templates schema and adds a stored choice field `Type` with choice `Snippet` through `PluginCollectionAPI.saveConfiguration()` when absent. If the Templates collection is source-managed, mirror that same field in its owning `plugin.json`; a later Plugins Manager reinstall otherwise replaces runtime-added schema fields.
 
 ## Spine (`window.__templater`)
 
@@ -195,7 +203,7 @@ The managed-hook mechanism, token grammar, and property-chip settings approach w
 
 ## Data model
 
-Reads the **Templates** collection; writes audit rows to a template-log collection if present. Creates no collections. See `CONSTANTS.md` for GUIDs.
+Reads the **Templates** collection; writes audit rows to a template-log collection if present. Creates no collections. The first snippet save may add the `Type → Snippet` choice to the existing Templates schema as described above. See `CONSTANTS.md` for GUIDs.
 
 ## 10x features (v2.40–v2.43)
 

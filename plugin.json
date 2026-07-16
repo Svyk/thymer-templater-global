@@ -1,15 +1,16 @@
 {
   "ver": 1,
-  "version": "2.47.0",
+  "version": "2.48.0",
   "name": "Templater",
   "icon": "ti-files",
-  "description": "Apply templates with native properties/body segments, Journal chains and carry queries, multi-stop cursors, dry previews, per-collection defaults, and positional ;; inline insertion.",
+  "description": "Apply templates with native properties/body segments, plus a live caret-anchored ;; popup and collection-free inline Snippets.",
   "__source_repo": "https://github.com/Svyk/thymer-templater-global",
   "show_sidebar_items": true,
   "show_cmdpal_items": true,
   "custom": {
     "autoTitleRules": {},
     "collectionDefaults": {},
-    "inlineTrigger": ";;"
+    "inlineTrigger": ";;",
+    "inlineLive": true
   }
 }

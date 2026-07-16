@@ -1,4 +1,4 @@
-# Templater v2.0.0 — Constants
+# Templater v2.48.0 — Constants
 
 GUIDs and identifiers the v2 global plugin depends on. The plugin encodes collection **names** as constants and resolves GUIDs at runtime — these are recorded here for reference and ops, not hardcoded in `plugin.js`.
 
@@ -12,7 +12,7 @@ GUIDs and identifiers the v2 global plugin depends on. The plugin encodes collec
 
 | Constant | Value | Notes |
 |---|---|---|
-| `TEMPLATES_GUID` | `1DEGAQTQARK8MKNAFZ9D1MY16W` | The **Templates** collection — source of template records (read by label: `Template Name`, `Template Content`, `Variables (JSON)`, `Triggers`, `Version`, `Extends`, `lastUsed`) |
+| `TEMPLATES_GUID` | `1DEGAQTQARK8MKNAFZ9D1MY16W` | The **Templates** collection — source of template records (read by label: `Template Name`, `Template Content`, `Variables (JSON)`, `Triggers`, `Version`, `Extends`, `lastUsed`, `Type`; `Type=Snippet` is inline-only) |
 | `AUDIT_GUID` | `14QZGY1XMNSQDQCTRW2MVS3H2W` | **Template Applications** — reused as the audit/apply log. Fields: `Template`, `Target Record`, `Target Collection`, `Applied At`, `Rendered Output`. Looked up by name "Template Log" first, then "Template Applications". Audit is best-effort — never throws if absent. |
 
 ## Workspace
