@@ -164,6 +164,7 @@ const snippetTemplate = (name = 'Clip') => ({
     navigateTo: async options => { navigations.push(options); return true; },
   };
   tokenPlugin.ui = { getActivePanel: () => tokenPanel };
+  tokenPlugin.getConfiguration = () => ({ custom: { inlineNavFlash: true } });
   tokenPlugin.data = { getRecord: () => tokenRecord };
   tokenPlugin.assembleTemplateSource = async () => '{{time}} — {{prompt:Entry}} {{cursor}}';
   tokenPlugin.resolveIncludes = async value => value;
@@ -272,15 +273,18 @@ const snippetTemplate = (name = 'Clip') => ({
   assert.strictEqual(plugin._previewLineLimit(Array.from({ length: 25 }, (_, i) => String(i)).join('\n'), 20).split('\n').length, 20);
   console.log('PASS v2.48.2 preview toggle state, keybind, and 20-line cap');
 
+  let anchorResolved = 0;
   const anchorLine = {
     guid: 'ANCHOR', parent_guid: 'REC', segments: [{ type: 'text', text: 'Prefix ;;q' }],
-    setSegments: async segments => { anchorLine.segments = segments; return true; },
+    setSegments: async segments => { anchorLine.segments = segments; freshAnchorLine.segments = segments; return true; },
   };
+  const freshAnchorLine = { guid: 'ANCHOR', parent_guid: 'REC', segments: anchorLine.segments };
   const writes = [];
   const record = {
     guid: 'REC',
-    getLineItems: async () => [anchorLine],
+    getLineItems: async () => [anchorResolved++ === 0 ? anchorLine : freshAnchorLine],
     createLineItem: async (parent, after, type, segments) => {
+      assert.notStrictEqual(after, anchorLine, 'createLineItem never receives the wrapper used for the guarded span replacement');
       const line = { guid: 'NEW' + (writes.length + 1) };
       writes.push({ parent, after, type, segments });
       return line;
@@ -295,9 +299,67 @@ const snippetTemplate = (name = 'Clip') => ({
   await plugin._applyInlineAnchorLine(record, anchor, null);
   assert.strictEqual(anchorLine.segments.map(segment => segment.text).join(''), 'Prefix ', 'multi-line mode keeps the prefix on its anchor line');
   await plugin.writeBody(record, '- one\n- two', { anchor });
-  assert.strictEqual(writes[0].after, anchorLine, 'multi-line body still starts immediately after the anchor');
+  assert.strictEqual(writes[0].after, freshAnchorLine, 'multi-line body starts after a freshly resolved post-write anchor');
   assert.strictEqual(writes[1].after.guid, 'NEW1', 'multi-line sibling order is unchanged');
-  console.log('PASS v2.48 multi-line anchor behavior is unchanged');
+  console.log('PASS v2.48.5 multi-line body creation never reuses the pre-replacement anchor wrapper');
+
+  const empPlugin = new Plugin();
+  empPlugin._state = {
+    clearing: new Set(), slashCooldown: new Map(), applying: new Set(), templaterCreated: new Set(), cursorStops: null,
+  };
+  let empAnchorSegments = [{ type: 'text', text: 'Context ;;emp' }];
+  let spanWriteWrapper = null;
+  const empCreated = [];
+  const makeEmpAnchor = () => {
+    const wrapper = {
+      guid: 'EMP-ANCHOR', parent_guid: 'EMP-REC', segments: empAnchorSegments.map(segment => ({ ...segment })),
+      setSegments: async segments => {
+        spanWriteWrapper = wrapper;
+        empAnchorSegments = segments.map(segment => ({ ...segment }));
+        wrapper.segments = empAnchorSegments.map(segment => ({ ...segment }));
+        return true;
+      },
+    };
+    return wrapper;
+  };
+  const empRecord = {
+    guid: 'EMP-REC', getName: () => 'EMP target', getJournalDetails: () => null, prop: () => null,
+    getLineItems: async () => [makeEmpAnchor(), ...empCreated],
+    createLineItem: async (parent, after, type, segments, props) => {
+      assert.notStrictEqual(after, spanWriteWrapper, 'EMP body creation rejects the stale span-write wrapper');
+      const created = { guid: 'EMP-' + (empCreated.length + 1), parent_guid: parent && parent.guid || 'EMP-REC', type, segments, props };
+      empCreated.push(created);
+      return created;
+    },
+  };
+  const empNavigations = [];
+  empPlugin.ui = { getActivePanel: () => ({
+    getActiveRecord: () => empRecord, getActiveCollection: () => null,
+    navigateTo: async options => { empNavigations.push(options); return true; },
+  }) };
+  empPlugin.data = { getRecord: () => empRecord };
+  empPlugin.tTriggers = () => [];
+  empPlugin.tField = () => '';
+  empPlugin.writeAuditRow = async () => {};
+  empPlugin.toast = () => {};
+  const empRendered = await empPlugin.renderTemplate([
+    '## EMP Review',
+    '- [ ] Review environmental records',
+    '- [ ] Record corrective actions {{cursor}}',
+  ].join('\n'), { prompts: {}, vars: {}, templateName: 'EMP Review' });
+  await empPlugin.applyTemplate(snippetTemplate('EMP Review'), empRendered, { anchor: {
+    record: empRecord, recordGuid: 'EMP-REC', lineGuid: 'EMP-ANCHOR', afterLineGuid: 'EMP-ANCHOR',
+    lineItem: makeEmpAnchor(), parentGuid: 'EMP-REC', trigger: ';;', query: 'emp',
+    replaceStart: 8, replaceEnd: 13, prefixText: 'Context ', originalSegments: empAnchorSegments,
+  } });
+  assert.deepStrictEqual(empCreated.map(line => line.type), ['heading', 'task', 'task'], 'EMP Review creates its heading and both checkboxes');
+  assert.strictEqual(empCreated[1].parent_guid, empCreated[0].guid, 'EMP checklist nests under its heading');
+  assert.strictEqual(empCreated[2].parent_guid, empCreated[0].guid, 'all EMP checklist lines are created');
+  assert.deepStrictEqual(empNavigations, [], 'default inlineNavFlash=false emits no navigateTo call for the cursor stop');
+  assert.strictEqual(empPlugin._inlineNavFlashEnabled(), false, 'inline navigation flash defaults off');
+  empPlugin.getConfiguration = () => ({ custom: { inlineNavFlash: true } });
+  assert.strictEqual(empPlugin._inlineNavFlashEnabled(), true, 'inline navigation flash can be explicitly enabled');
+  console.log('PASS v2.48.5 EMP Review inserts fully and inlineNavFlash gates highlighted navigation');
 
   const semantics = plugin._templateSemantics(snippetTemplate(), true);
   assert.deepStrictEqual(semantics, {

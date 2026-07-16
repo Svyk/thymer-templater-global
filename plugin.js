@@ -1,11 +1,11 @@
-// Thymer Templater v2.48.4 — Rendered inline tokens + robust ;; relocation.
+// Thymer Templater v2.48.5 — Reliable multi-line snippets + optional inline navigation flash.
 // Full template language: prompt / date / record.Prop / var.NAME / ref / tag /
 // include (recursion limit 3) / <%* async js %> with tp.* namespace + blocklist.
 // Frontmatter -> properties, title-setting, segment-aware nested body writer, all
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.48.4 loaded — rendered inline tokens + robust ;; relocation.', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.48.5 loaded — reliable multi-line snippets + optional inline navigation flash.', 'color:#10b981;font-weight:bold');
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
 const RECURSION_LIMIT = 3;
@@ -40,6 +40,7 @@ const COLLECTION_DEFAULTS_KEY = "collectionDefaults";
 const INLINE_TRIGGER_KEY = "inlineTrigger";
 const INLINE_LIVE_KEY = "inlineLive";
 const INLINE_SCOPE_KEY = "inlineScope";
+const INLINE_NAV_FLASH_KEY = "inlineNavFlash";
 const AUTO_TITLE_PANEL_TYPE = "templater-auto-title-rules";
 const SETTINGS_PANEL_TYPE = "templater-settings";
 const AUTO_TITLE_HOOK_NAME = "Templater Auto-title";
@@ -439,7 +440,7 @@ class Plugin extends AppPlugin {
       } catch (e) { return { error: String(e && e.message || e) }; }
     };
 
-    try { window.__TEMPLATER_VERSION = '2.48.4'; } catch (e) {}
+    try { window.__TEMPLATER_VERSION = '2.48.5'; } catch (e) {}
     console.log('[Templater] commands + slash + auto-apply + triggers engine registered.');
   }
 
@@ -1064,7 +1065,7 @@ class Plugin extends AppPlugin {
     const current = (api.getConfiguration && api.getConfiguration()) || (this.getConfiguration && this.getConfiguration()) || {};
     const custom = current.custom && typeof current.custom === 'object' ? current.custom : {};
     await api.saveConfiguration(Object.assign({}, current, {
-      version: '2.48.4',
+      version: '2.48.5',
       custom: Object.assign({}, custom, { [AUTO_TITLE_RULES_KEY]: rules })
     }));
   }
@@ -1099,6 +1100,23 @@ class Plugin extends AppPlugin {
     return String(this._customConfig()[INLINE_SCOPE_KEY] || 'snippets').toLowerCase() === 'all' ? 'all' : 'snippets';
   }
 
+  _inlineNavFlashEnabled() {
+    const custom = this._customConfig();
+    const value = Object.prototype.hasOwnProperty.call(custom, INLINE_NAV_FLASH_KEY) ? custom[INLINE_NAV_FLASH_KEY] : false;
+    return value === true || String(value).toLowerCase() === 'on' || String(value).toLowerCase() === 'true';
+  }
+
+  _refocusInlineEditor() {
+    // The inline picker prevents its own mousedown from stealing focus, so the
+    // native caret normally remains on the anchor line. Refocus Thymer's virtual
+    // input without navigation/scroll as a best-effort backstop. Mutating the
+    // private caret model is deliberately avoided; it is not a stable SDK API.
+    try {
+      const input = typeof g_virtual_input !== 'undefined' && g_virtual_input && g_virtual_input.$textarea;
+      if (input && input.focus) input.focus({ preventScroll: true });
+    } catch (e) {}
+  }
+
   _inlineScopedTemplates(records) {
     const list = Array.isArray(records) ? records : [];
     return this._inlineScope() === 'all' ? list.slice() : list.filter(record => this.isSnippet(record));
@@ -1114,7 +1132,7 @@ class Plugin extends AppPlugin {
     const current = (api.getConfiguration && api.getConfiguration()) || (this.getConfiguration && this.getConfiguration()) || {};
     const custom = current.custom && typeof current.custom === 'object' ? current.custom : {};
     await api.saveConfiguration(Object.assign({}, current, {
-      version: '2.48.4',
+      version: '2.48.5',
       custom: Object.assign({}, custom, patch || {})
     }));
   }
@@ -1183,13 +1201,17 @@ class Plugin extends AppPlugin {
     const scopeInput = document.createElement('input'); scopeInput.type = 'checkbox'; scopeInput.checked = this._inlineScope() === 'all';
     const scopeText = document.createElement('span'); scopeText.textContent = 'Show all templates in ;; popup (default: snippets only)';
     scopeRow.append(scopeInput, scopeText); root.appendChild(scopeRow);
+    const navFlashRow = document.createElement('label'); navFlashRow.className = 'tmpl-check';
+    const navFlashInput = document.createElement('input'); navFlashInput.type = 'checkbox'; navFlashInput.checked = this._inlineNavFlashEnabled();
+    const navFlashText = document.createElement('span'); navFlashText.textContent = 'Navigate to and pulse the first {{cursor}} after ;; insert (default: off)';
+    navFlashRow.append(navFlashInput, navFlashText); root.appendChild(navFlashRow);
     const inlineActions = document.createElement('div'); inlineActions.className = 'tmpl-auto-title-actions';
     const saveInline = document.createElement('button'); saveInline.className = 'tmpl-btn primary'; saveInline.textContent = 'Save inline trigger'; inlineActions.appendChild(saveInline); root.appendChild(inlineActions);
     saveInline.onclick = async () => {
       const value = inlineInput.value;
       if (value && (value.length < 2 || value.length > 3)) { setStatus('Trigger must be 2–3 characters, or blank to disable.', true); return; }
       saveInline.disabled = true; setStatus('Saving…', false);
-      try { await this._saveCustomConfigPatch({ [INLINE_TRIGGER_KEY]: value || false, [INLINE_LIVE_KEY]: !!liveInput.checked, [INLINE_SCOPE_KEY]: scopeInput.checked ? 'all' : 'snippets' }); setStatus(value ? ('Inline trigger set to ' + value) : 'Inline trigger disabled.', false); }
+      try { await this._saveCustomConfigPatch({ [INLINE_TRIGGER_KEY]: value || false, [INLINE_LIVE_KEY]: !!liveInput.checked, [INLINE_SCOPE_KEY]: scopeInput.checked ? 'all' : 'snippets', [INLINE_NAV_FLASH_KEY]: !!navFlashInput.checked }); setStatus(value ? ('Inline trigger set to ' + value) : 'Inline trigger disabled.', false); }
       catch (e) { setStatus('Could not save: ' + (e && e.message || e), true); }
       saveInline.disabled = false;
     };
@@ -3554,7 +3576,9 @@ ${renderTemplaterAutoTitle.toString()}
       if (firstIndex >= 0) {
         let first = rawLines[firstIndex].trim(); const stops = [];
         first = first.replace(/<!--PLEXUS-CURSOR:([1-9])-->/g, (_, stop) => { stops.push(parseInt(stop, 10)); return ''; }).trim();
-        let anchorLine = opts.anchor.lineItem || await this._lineItemByGuid(targetRecord, opts.anchor.afterLineGuid);
+        // The trigger-removal write can invalidate its line wrapper. Resolve
+        // again before the optional empty-anchor reuse write as well.
+        let anchorLine = await this._lineItemByGuid(targetRecord, opts.anchor.afterLineGuid || opts.anchor.lineGuid);
         if (anchorLine && anchorLine.setSegments) {
           try { await anchorLine.setSegments(this._anchorLineSegments(first)); opts.anchor.lineItem = anchorLine; } catch (e) { console.warn('[Templater] inline first-line reuse failed:', e); }
           for (let i = 0; i < stops.length; i++) cursorSeed.push({ stop: stops[i], guid: opts.anchor.afterLineGuid, order: i });
@@ -3628,9 +3652,17 @@ ${renderTemplaterAutoTitle.toString()}
       try { if (typeof window !== 'undefined' && window.__plexusCanvas && window.__plexusCanvas.attachScene) { await window.__plexusCanvas.attachScene(targetRecord.guid, true); specialNavigated = true; } else this.toast("Templater", "plexus: hybrid needs the Plexus Canvas plugin installed."); } catch (e) { console.warn('[Templater] attachScene failed:', e); }
     }
     // TP-3: if the template had a {{cursor}}, jump to that line (highlighted) so the user lands ready to type.
+    // Inline insertion defaults to keeping Thymer's native caret/focus on the
+    // anchor. navigateTo emits panel.navigated + highlightLines, which the
+    // Navigation plugin intentionally pulses; custom.inlineNavFlash restores
+    // that legacy behavior for users who want it.
     if (cursorGuids.length) {
       this._state.cursorStops = cursorGuids.length > 1 ? { recordGuid: targetRecord.guid, stops: cursorGuids, idx: 1 } : null;
-      try { const cp = this.ui.getActivePanel && this.ui.getActivePanel(); if (cp && cp.navigateTo) { const ok = await cp.navigateTo({ itemGuid: cursorGuids[0], highlight: true }); if (ok !== false) return targetRecord.guid; } } catch (e) { console.warn('[Templater] cursor nav failed:', e); }
+      if (inlineMode && !this._inlineNavFlashEnabled()) {
+        this._refocusInlineEditor();
+      } else {
+        try { const cp = this.ui.getActivePanel && this.ui.getActivePanel(); if (cp && cp.navigateTo) { const ok = await cp.navigateTo({ itemGuid: cursorGuids[0], highlight: true }); if (ok !== false) return targetRecord.guid; } } catch (e) { console.warn('[Templater] cursor nav failed:', e); }
+      }
     }
     if (specialNavigated) return targetRecord.guid;
 
@@ -4175,6 +4207,37 @@ ${renderTemplaterAutoTitle.toString()}
     } catch (e) { return null; }
   }
 
+  async _freshInlineCreateContext(record, anchor, parentItem, afterItem) {
+    // setSegments invalidates the editor wrapper that authorized that write on
+    // some Thymer builds. Body lines are NEW siblings/children, so resolve the
+    // record and all existing GUID-backed placement handles from post-write
+    // state before every createLineItem. Never carry the pre-replace anchor
+    // snapshot into the create path.
+    let freshRecord = record;
+    const recordGuid = anchor && (anchor.recordGuid || (record && (record.guid || (record.getGuid && record.getGuid()))));
+    try {
+      let resolved = recordGuid && this.data && this.data.getRecord && this.data.getRecord(recordGuid);
+      if (resolved && resolved.then) resolved = await resolved;
+      if (resolved) freshRecord = resolved;
+    } catch (e) {}
+
+    let items = [];
+    try { items = freshRecord && freshRecord.getLineItems ? await freshRecord.getLineItems(false) : []; } catch (e) { items = []; }
+    const byGuid = new Map((items || []).filter(item => item && item.guid).map(item => [item.guid, item]));
+    const anchorGuid = anchor && (anchor.afterLineGuid || anchor.lineGuid);
+    const freshAnchor = anchorGuid ? byGuid.get(anchorGuid) : null;
+    if (!freshAnchor) throw new Error('The remembered ;; line moved before the inline body could be inserted.');
+
+    const refresh = item => item && item.guid && byGuid.get(item.guid) || item || null;
+    const freshParent = refresh(parentItem);
+    let freshAfter = refresh(afterItem);
+    if (afterItem && afterItem.guid === anchorGuid) freshAfter = freshAnchor;
+
+    anchor.record = freshRecord;
+    anchor.lineItem = freshAnchor;
+    return { record: freshRecord, parentItem: freshParent, afterItem: freshAfter };
+  }
+
   _anchorLineSegments(raw) {
     let line = String(raw || '').trim();
     line = line.replace(/^(?:#{1,6}\s+|>\s+|[-*+]\s*(?:\[[ xX]\]\s*)?|\d+\.\s*)/, '');
@@ -4356,9 +4419,15 @@ ${renderTemplaterAutoTitle.toString()}
     let baseParent = null, anchorAfter = null;
     if (anchor) {
       const recordGuid = record && (record.guid || (record.getGuid && record.getGuid()));
-      if (anchor.parentGuid && anchor.parentGuid !== recordGuid) baseParent = await this._lineItemByGuid(record, anchor.parentGuid);
-      anchorAfter = anchor.lineItem || await this._lineItemByGuid(record, anchor.afterLineGuid);
-      if (anchorAfter) lastChildOf.set(ROOT, anchorAfter);
+      const parentSeed = anchor.parentGuid && anchor.parentGuid !== recordGuid ? { guid: anchor.parentGuid } : null;
+      const anchorSeed = { guid: anchor.afterLineGuid || anchor.lineGuid };
+      // Do not prefer anchor.lineItem here: it is the wrapper used by the
+      // preceding span replacement and can already be invalid. Resolve record,
+      // parent, and anchor together from post-write state, then do the same
+      // immediately before every body create.
+      const context = await this._freshInlineCreateContext(record, anchor, parentSeed, anchorSeed);
+      record = context.record; baseParent = context.parentItem; anchorAfter = context.afterItem;
+      lastChildOf.set(ROOT, anchorAfter);
     }
     const cursorStops = (opts && Array.isArray(opts.cursorSeed) ? opts.cursorSeed.slice() : []); let cursorOrder = cursorStops.length;
     for (const raw of lines) {
@@ -4436,9 +4505,17 @@ ${renderTemplaterAutoTitle.toString()}
       try {
         // parentItem + afterItem are PluginLineItem OBJECTS (or null). afterItem = the previous
         // sibling under this parent, so lines append in author order instead of reversing.
-        created = await record.createLineItem(parentItem, afterItem, type, segments, props);
+        let createRecord = record, createParent = parentItem, createAfter = afterItem;
+        if (anchor) {
+          const context = await this._freshInlineCreateContext(record, anchor, parentItem, afterItem);
+          createRecord = context.record; createParent = context.parentItem; createAfter = context.afterItem;
+          record = createRecord;
+          if (baseParent && createParent && baseParent.guid === createParent.guid) baseParent = createParent;
+        }
+        created = await createRecord.createLineItem(createParent, createAfter, type, segments, props);
       } catch (e) {
         console.warn('[Templater] createLineItem failed for', type, line, e);
+        if (anchor) throw e;
       }
       if (created) {
         lastChildOf.set(parentKey, created);

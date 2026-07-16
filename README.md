@@ -2,7 +2,7 @@
 
 A Thymer **global AppPlugin** that turns saved template records into fully-formed Thymer records — title, typed properties, and native nested body — in one keystroke. Pick a template, answer any prompts, and Templater renders the tokens and applies the result to a new or existing record. Templates can also **auto-apply** when you create a record, run on a **schedule**, and be edited through a **form dialog** with autocomplete.
 
-**v2.48.4:** renders inline snippets through the full template pipeline (including `{{time}}`, prompts, dates, and `{{cursor}}` stops) before segment splicing, and re-finds the last live `;;query`—falling back to the last bare `;;`—at commit time so prefix edits and rich prefix segments do not cause false stale-line errors. Ctrl+O / Cmd+O still toggles the dry-render preview. The popup remains fully opaque and scoped to **Type=Snippet** templates by default; choose **all** in Templater settings for regular templates too.
+**v2.48.5:** multi-line `;;` snippets now resolve the anchor from post-replacement editor state before every new body-line insert, preventing the stale-wrapper/“editor overwrote” failure. Inline inserts no longer emit a highlighted navigation by default, so the Navigation plugin does not pulse/center the inserted line; enable **Navigate to and pulse the first `{{cursor}}` after `;;` insert** in Templater settings to restore the old behavior.
 
 Templates live in the **Templates** collection — one record per template. The body can be authored as the template record's own nested outline (WYSIWYG) or as a markdown block in the `Template Content` text property; the short `---` frontmatter (which sets the new record's properties) lives in `Template Content`.
 
@@ -178,7 +178,7 @@ A small JSON object on each template:
 
 ## Per-collection defaults
 
-Open **Templater: Settings…** and map a collection to a template. A local, newly-created record receives that template headlessly only when it has no body content and no `record.created` trigger claims the collection. Records created by Templater are transiently guarded so a default cannot recursively fire. Settings are stored in `custom.collectionDefaults`; the same panel controls `custom.inlineTrigger` (`;;` by default, `false` when disabled) and `custom.inlineLive` (default `true`).
+Open **Templater: Settings…** and map a collection to a template. A local, newly-created record receives that template headlessly only when it has no body content and no `record.created` trigger claims the collection. Records created by Templater are transiently guarded so a default cannot recursively fire. Settings are stored in `custom.collectionDefaults`; the same panel controls `custom.inlineTrigger` (`;;` by default, `false` when disabled), `custom.inlineLive` (default `true`), and `custom.inlineNavFlash` (default `false`).
 
 ## Snippets & the `;;` popup
 
@@ -186,7 +186,7 @@ Type `;;` anywhere in an editor line. A RefX-style popup opens at Thymer's real 
 
 Templates whose **Type** choice is **Snippet** appear first with a `✂` marker. Snippets are collection-free and body-only: they never enter record create/fill flows, ask for a target collection, apply frontmatter/properties, or run banner/relation directives. Prompt tokens still open their normal modal before insertion. Use **Templater: New snippet from selection** to capture the current text selection, or the active line when nothing is selected.
 
-A single rendered body line is spliced into the trigger line as native segments, preserving both prefix and suffix text. Multi-line bodies retain v2.47 anchor mode: the trigger text is removed, the surrounding line is kept, and blocks are inserted immediately after it (an otherwise-empty trigger line may be reused for the first block). `{{cursor}}` stops work in both forms.
+A single rendered body line is spliced into the trigger line as native segments, preserving both prefix and suffix text. Multi-line bodies retain anchor mode: the trigger text is removed, the surrounding line is kept, and blocks are inserted immediately after it (an otherwise-empty trigger line may be reused for the first block). The anchor is re-resolved after the replacement before new sibling lines are created, so the edit guard applies only to the trigger span—not to new body lines. `{{cursor}}` stops are retained in both forms. By default an inline stop does not call `panel.navigateTo`, avoiding `panel.navigated.highlightLines` and the Navigation-plugin flash; the editor stays focused on the anchor and later stops remain available through **Templater: Next cursor stop**. Set `custom.inlineNavFlash` to `true` in **Templater: Settings…** to navigate/pulse stop 1 as before.
 
 The global Templater plugin does not own the Templates collection's `plugin.json`, so it must not declare collection fields in this repository. On the first snippet save it preserves the full Templates schema and adds a stored choice field `Type` with choice `Snippet` through `PluginCollectionAPI.saveConfiguration()` when absent. If the Templates collection is source-managed, mirror that same field in its owning `plugin.json`; a later Plugins Manager reinstall otherwise replaces runtime-added schema fields.
 
