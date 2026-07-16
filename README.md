@@ -2,7 +2,7 @@
 
 A Thymer **global AppPlugin** that turns saved template records into fully-formed Thymer records — title, typed properties, and native nested body — in one keystroke. Pick a template, answer any prompts, and Templater renders the tokens and applies the result to a new or existing record. Templates can also **auto-apply** when you create a record, run on a **schedule**, and be edited through a **form dialog** with autocomplete.
 
-**v2.46.0:** applying a template while a Journal day is open now defaults to **Fill this journal page** instead of creating a record in the template's pinned collection. Journal date titles remain host-owned; template properties are applied when compatible and the body is inserted at the page top. This release also adds per-collection **Auto-title rules** with real apply-time titles and an optional removable display-only live hook.
+**v2.47.0:** adds Journal-chain/carry tokens, numbered cursor stops, date/suggester prompts, per-collection default templates, a side-by-side dry preview in the picker, and the Roam-style `;;` inline insertion trigger.
 
 Templates live in the **Templates** collection — one record per template. The body can be authored as the template record's own nested outline (WYSIWYG) or as a markdown block in the `Template Content` text property; the short `---` frontmatter (which sets the new record's properties) lives in `Template Content`.
 
@@ -10,9 +10,12 @@ Templates live in the **Templates** collection — one record per template. The 
 
 - **Cmd+K → "Apply Template…"** — pick a template, answer prompts, confirm. Creates/updates the target record and navigates to it.
 - **Inline `/tmpl`** — in any line, type `/tmpl` to open the picker or `/tmpl <name>` to jump to one; applied in place per its Triggers.
+- **Inline `;;`** — type `;;query` at the end of any line to fuzzy-search and insert a template at that exact block position. `;;;` escapes to literal `;;`; change or disable it in **Templater: Settings…**.
 - **Cmd+K → "Templater: Edit template…"** — the form editor (below). Edits the active Templates record, else prompts you to pick one.
 - **Auto-apply** — make a new record in a collection that has a template with `Trigger On: record.created:<Collection>` and the body/props are scaffolded automatically (silent, no prompts).
 - **Schedule** — a template with a `Schedule` (e.g. `06:00 daily`) + `Target` (e.g. `journal:today`) fires on its own.
+
+The picker renders a side-by-side, scrollable preview of the highlighted template (up to about 30 lines). Preview is a strict dry render: prompts become placeholders, JavaScript becomes `⟨js⟩`, dates resolve normally, and apply-time directives cannot run.
 
 ## The Template Editor (form)
 
@@ -40,6 +43,8 @@ Tokens are written in `Template Content` (the `---` frontmatter and the body) or
 | `{{prompt:LABEL}}` | Text input; value substituted |
 | `{{prompt:LABEL ?? default}}` | Text input with a default (`?? ` with nothing = optional/empty) |
 | `{{prompt.choice:LABEL :: A, B, C}}` | Pick one of the listed options |
+| `{{suggester:LABEL|A,B,C}}` | Alias of `prompt.choice` (Roam-style spelling) |
+| `{{prompt.date:LABEL ?? 2026-07-16}}` | Date input; emits a native datetime segment when it is the line's only text run, otherwise ISO text |
 | `{{prompt.record:LABEL :: Collection}}` | Pick one record from `Collection` → a `ref` segment / relation |
 | `{{prompt.records:LABEL :: Collection}}` | Pick multiple records (multi-relation) |
 
@@ -64,17 +69,31 @@ The same `LABEL` is asked once even if reused (e.g. a Title composed of `{{promp
 | `{{record.PropName}}` | A property value of the active/target record |
 | `{{var.NAME}}` | A default from the template's `Variables (JSON)` → `defaults` |
 
+### Journal chains and carry-forward
+
+| Token | Resolves to |
+|---|---|
+| `{{journal:yesterday}}` / `{{journal:tomorrow}}` | Real ref segment to the adjacent Journal day |
+| `{{journal:+N}}` / `{{journal:-N}}` | Real ref segment to the target Journal day plus/minus `N` local calendar days |
+| `{{carry:unfinished}}` | Live Datacore line: `dc: @task and @todo and date=<yesterday> \| list` |
+| `{{carry:refs}}` | Frozen refs to up to 20 unfinished task lines from yesterday |
+
+Journal math uses the page being filled (`record.getJournalDetails().date`), falling back to today outside Journal. `carry:unfinished` stays live and reflects later task changes without copying tasks. `carry:refs` is a static snapshot of the matching task GUIDs at apply time. Neither form duplicates a task; scheduling remains one-GUID/in-place.
+
 ### Directives (do something after apply)
 
 | Token | Effect |
 |---|---|
-| `{{cursor}}` | Put the cursor on this line after apply (and highlight it) |
+| `{{cursor}}` | Cursor stop 1; navigate here after apply |
+| `{{cursor:2}}` … `{{cursor:9}}` | Additional ordered stops for **Templater: Next cursor stop** |
 | `{{banner:https://…}}` | Fetch the image and set it as the new record's banner |
 | `{{relate:Field=Name}}` | Set a typed **relation** property `Field` → the resolved record |
 | `{{task: Title \| status=To Do \| priority=High \| context=Computer \| due=+3 days}}` | Spawn a linked **Rich Task** record (not a body line) |
 | `{{include:Template Name}}` | Inline another template's content (recursion limit 3) |
 | `<!--PLEXUS-PROMOTE-->` | After apply, promote the body's native `- [ ]` tasks → linked Rich Tasks |
 | `{{ai:: instruction}}` | Inline text generated by the local `/llm` proxy (best-effort; empty if down) |
+
+After stop 1, run **Templater: Next cursor stop** to move through the remaining lines; the transient stop list clears after the final stop or when you leave the record. For a one-key workflow, bind this command through the Keyboard Shortcuts plugin.
 
 ### JavaScript blocks `<%* … %>`
 
@@ -155,6 +174,12 @@ A small JSON object on each template:
 | `Schedule: 06:00 daily` (+ `Target`) | Time-based fire; `Target` = `journal:today`, a collection, append/update, etc. |
 | `Condition` | A predicate gate (Datacore expr / weekday / `Prop=val`); empty = always |
 | legacy `Triggers: auto:<Collection>` | Same as `Trigger On: record.created:<Collection>` |
+
+## Per-collection defaults
+
+Open **Templater: Settings…** and map a collection to a template. A local, newly-created record receives that template headlessly only when it has no body content and no `record.created` trigger claims the collection. Records created by Templater are transiently guarded so a default cannot recursively fire. Settings are stored in `custom.collectionDefaults`; the same panel controls `custom.inlineTrigger` (`;;` by default, `false` when disabled).
+
+In `;;` anchor mode, body blocks are inserted as siblings immediately after the trigger line. An empty trigger line is reused as the first template line. Title/frontmatter/banner/relation directives are skipped; Escape in the picker restores the original `;;query` text.
 
 ## Spine (`window.__templater`)
 

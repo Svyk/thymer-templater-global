@@ -1,11 +1,11 @@
-// Thymer Templater v2.46.0 — Journal fill fix + per-collection Auto-title rules.
+// Thymer Templater v2.47.0 — Journal chains, cursor stops, defaults, preview, inline trigger.
 // Full template language: prompt / date / record.Prop / var.NAME / ref / tag /
 // include (recursion limit 3) / <%* async js %> with tp.* namespace + blocklist.
 // Frontmatter -> properties, title-setting, segment-aware nested body writer, all
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.46.0 loaded — Journal fill + per-collection Auto-title rules.', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.47.0 loaded — Journal chains + multi-cursor + preview + inline trigger.', 'color:#10b981;font-weight:bold');
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
 const RECURSION_LIMIT = 3;
@@ -32,7 +32,10 @@ const F_LASTFIRED = "Last Fired";  // engine-written dedup stamp (datetime, sync
 const F_TITLEPATTERN = "Title Pattern"; // per-collection title pattern, e.g. "{{Type}} · {{Lead}}" — Rename from properties
 const F_AUTOTITLE = "Auto Title";       // choice Off/On — auto-title records of this template's collection (set-once-until-manual)
 const AUTO_TITLE_RULES_KEY = "autoTitleRules";
+const COLLECTION_DEFAULTS_KEY = "collectionDefaults";
+const INLINE_TRIGGER_KEY = "inlineTrigger";
 const AUTO_TITLE_PANEL_TYPE = "templater-auto-title-rules";
+const SETTINGS_PANEL_TYPE = "templater-settings";
 const AUTO_TITLE_HOOK_NAME = "Templater Auto-title";
 const AUTO_TITLE_HOOK_START = "/* " + AUTO_TITLE_HOOK_NAME + ": managed collection hook - begin */";
 const AUTO_TITLE_HOOK_END = "/* " + AUTO_TITLE_HOOK_NAME + ": managed collection hook - end */";
@@ -169,6 +172,9 @@ class Plugin extends AppPlugin {
       autoCooldown: _prev.autoCooldown || new Map(),
       slashCooldown: new Map(),
       clearing: new Set(),
+      templaterCreated: _prev.templaterCreated || new Set(),
+      cursorStops: null,
+      inlineAnchor: null,
       applying: _prev.applying || new Set(),       // records the engine is writing to — guards self-trigger loops
       lastFired: _prev.lastFired || new Map(),      // tmplGuid -> last-fired occurrence ms (mirrors the Last Fired prop)
       journalSeen: _prev.journalSeen || new Set(),  // "guid|YYYYMMDD" — journal.open dedup per page per day
@@ -182,6 +188,7 @@ class Plugin extends AppPlugin {
       autoTitleDebounce: new Map(),                  // recGuid → setTimeout handle (body-strategy debounce)
       bodyMembers: null,                             // recGuid → {name,pat} membership for body collections (fallback)
       autoTitlePanelRoots: new Set(),                // connected Auto-title settings panel roots
+      settingsPanelRoots: new Set(),                 // connected defaults/inline-trigger settings roots
     };
     this._state = window.__templater;
     this._state._instance = this;   // test/debug seam (mirrors __quickadd._instance)
@@ -260,6 +267,22 @@ class Plugin extends AppPlugin {
       const atcmd = this.ui.addCommandPaletteCommand({ label: "Templater: Auto-title rules…", icon: "ti-heading", onSelected: () => plugin.openAutoTitleRulesPanel() });
       if (atcmd && atcmd.remove) this._state.disposers.push(() => { try { atcmd.remove(); } catch (e) {} });
     } catch (e) { console.warn('[Templater] Auto-title rules UI failed:', e); }
+    // v2.47: per-collection default templates + configurable inline trigger.
+    try {
+      this.ui.registerCustomPanelType(SETTINGS_PANEL_TYPE, (panel) => {
+        try { if (panel.setTitle) panel.setTitle('Templater · Settings'); } catch (e) {}
+        const root = panel.getElement();
+        if (!root) return;
+        this._state.settingsPanelRoots.add(root);
+        plugin.renderSettingsPanel(root);
+      });
+      const settingsCmd = this.ui.addCommandPaletteCommand({ label: "Templater: Settings…", icon: "ti-settings", onSelected: () => plugin.openSettingsPanel() });
+      if (settingsCmd && settingsCmd.remove) this._state.disposers.push(() => { try { settingsCmd.remove(); } catch (e) {} });
+    } catch (e) { console.warn('[Templater] settings UI failed:', e); }
+    try {
+      const nextCursorCmd = this.ui.addCommandPaletteCommand({ label: "Templater: Next cursor stop", icon: "ti-cursor-text", onSelected: () => plugin.nextCursorStop() });
+      if (nextCursorCmd && nextCursorCmd.remove) this._state.disposers.push(() => { try { nextCursorCmd.remove(); } catch (e) {} });
+    } catch (e) { console.warn('[Templater] cursor-stop command failed:', e); }
     // AI-title command — title the open note from a 4-6 word AI summary of its body (needs the /llm proxy)
     try {
       const acmd = this.ui.addCommandPaletteCommand({ label: "Templater: AI title this note", icon: "ti-wand", onSelected: () => plugin.aiTitleActive() });
@@ -356,8 +379,9 @@ class Plugin extends AppPlugin {
         if (opts.collection) collection = (typeof opts.collection === 'string') ? await plugin.collectionByName(opts.collection) : opts.collection;
         if (!collection) { try { const pinned = plugin._templatePinnedCollection(tpl); if (pinned) collection = await plugin.collectionByName(pinned); } catch (e) {} }
         const panel = plugin.ui.getActivePanel && plugin.ui.getActivePanel();
-        const activeRecord = panel && panel.getActiveRecord && panel.getActiveRecord();
+        let activeRecord = panel && panel.getActiveRecord && panel.getActiveRecord();
         const activeCollection = panel && panel.getActiveCollection && panel.getActiveCollection();
+        if (opts.recordGuid) { try { activeRecord = await plugin.pollRecord(opts.recordGuid); } catch (e) {} }
         let rendered;
         try {
           rendered = await plugin.renderTemplate(content, {
@@ -582,52 +606,119 @@ class Plugin extends AppPlugin {
   // Picker
   // ========================================================================
 
-  async openPicker(presetTemplateName) {
+  _fuzzyScore(text, query) {
+    const hay = String(text || '').toLowerCase(), needle = String(query || '').trim().toLowerCase();
+    if (!needle) return 1;
+    const direct = hay.indexOf(needle); if (direct >= 0) return 1000 - direct - (hay.length - needle.length) * 0.01;
+    let pos = -1, score = 0, streak = 0;
+    for (const ch of needle) {
+      const next = hay.indexOf(ch, pos + 1); if (next < 0) return -1;
+      streak = next === pos + 1 ? streak + 1 : 0; score += 10 + streak * 4 - Math.max(0, next - pos - 1); pos = next;
+    }
+    return score - hay.length * 0.01;
+  }
+
+  async _dryPreview(template) {
+    let content = await this.assembleTemplateSource(template);
+    try {
+      const ext = (this.tField(template, F_EXTENDS) || '').trim();
+      if (ext) { const parent = await this.findTemplate(ext); if (parent) { const pc = await this.assembleTemplateSource(parent); if (pc) content = pc + '\n' + content; } }
+    } catch (e) {}
+    try { content = await this.resolveIncludes(content, 0, new Set()); } catch (e) {}
+    let vars = {};
+    try { const raw = this.tField(template, F_VARS) || this.tField(template, 'Variables'); if (raw) { const parsed = JSON.parse(raw); vars = parsed && parsed.defaults || {}; } } catch (e) {}
+    const panel = this.ui.getActivePanel && this.ui.getActivePanel();
+    const rendered = await this.renderTemplate(content || '', {
+      record: panel && panel.getActiveRecord && panel.getActiveRecord(),
+      collection: panel && panel.getActiveCollection && panel.getActiveCollection(),
+      prompts: {}, vars, empty: 'skip', templateName: this.tName(template)
+    }, { dry: true });
+    return this.previewText(rendered).split('\n').slice(0, 30).join('\n');
+  }
+
+  async _restoreInlineAnchor(anchor, original) {
+    if (!anchor) return;
+    const guid = anchor.lineGuid;
+    try { if (this._state && guid) { this._state.clearing.add(guid); this._state.slashCooldown.set(guid, Date.now()); } } catch (e) {}
+    try {
+      let line = anchor.lineItem;
+      if (!line && anchor.record) line = await this._lineItemByGuid(anchor.record, anchor.lineGuid);
+      if (line && line.setSegments) await line.setSegments([{ type: 'text', text: String(original == null ? anchor.originalText : original) }]);
+    } catch (e) { console.warn('[Templater] inline anchor restore failed:', e); }
+    setTimeout(() => { try { if (this._state && guid) { this._state.clearing.delete(guid); this._state.slashCooldown.delete(guid); } } catch (e) {} }, SLASH_COOLDOWN_MS + 50);
+  }
+
+  async openPicker(presetTemplateName, pickerOpts) {
     const plugin = this;
+    pickerOpts = pickerOpts || {};
+    const inlineAnchor = pickerOpts.anchor || null;
     let records;
     try {
       records = await this.loadTemplatesSorted();
       if (records === null) { this.toast("Templater", "\"" + TEMPLATES_COLL + "\" collection not found"); return; }
     } catch (e) {
       console.error('[Templater] failed to load templates:', e);
+      if (inlineAnchor) await this._restoreInlineAnchor(inlineAnchor);
       this.toast("Templater", "Failed to load: " + (e && e.message || e));
       return;
     }
-    if (!records.length) { this.toast("Templater", "No templates yet."); return; }
+    if (!records.length) { if (inlineAnchor) await this._restoreInlineAnchor(inlineAnchor); this.toast("Templater", "No templates yet."); return; }
 
-    if (presetTemplateName) {
-      const q = presetTemplateName.toLowerCase();
-      const direct = records.find(r => (this.tName(r) || "").toLowerCase() === q);
-      if (direct) { this.onTemplatePicked(direct); return; }
-      const partial = records.filter(r => (this.tName(r) || "").toLowerCase().includes(q));
-      if (partial.length === 1) { this.onTemplatePicked(partial[0]); return; }
-      if (partial.length) records = partial;
-    }
-
-    const items = records.map(r => {
-      const ver = this.tVersion(r);
-      const snippet = (this.tContent(r) || "").slice(0, 80).replace(/\s+/g, ' ').trim();
-      const desc = (ver ? ("v" + ver + (snippet ? " · " : "")) : "") + snippet;
-      return {
-        label: this.tName(r),
-        icon: "ti-files",
-        description: desc,
-        onSelected: () => plugin.onTemplatePicked(r)
-      };
-    });
-    try {
-      const panel = this.ui.getActivePanel && this.ui.getActivePanel();
-      const anchor = (panel && panel.getElement && panel.getElement()) || document.body;
-      this.ui.createDropdown({ attachedTo: anchor, options: items, width: 440, inputPlaceholder: "Search templates..." });
-    } catch (e) {
-      // Fallback to a keyboard-navigable suggester modal.
-      this.asyncSuggester("Apply Template", items.map(i => i.label)).then(idx => {
-        if (idx >= 0 && items[idx]) items[idx].onSelected();
+    const overlay = document.createElement('div'); overlay.className = 'tmpl-overlay';
+    const modal = document.createElement('div'); modal.className = 'tmpl-modal tmpl-picker-modal';
+    const heading = document.createElement('h2'); heading.textContent = inlineAnchor ? 'Insert template inline' : 'Apply Template'; modal.appendChild(heading);
+    const search = document.createElement('input'); search.className = 'tmpl-picker-search'; search.type = 'text'; search.placeholder = 'Fuzzy-search templates…'; search.value = presetTemplateName || ''; this.attachInputGuards(search); modal.appendChild(search);
+    const columns = document.createElement('div'); columns.className = 'tmpl-picker-columns';
+    const list = document.createElement('ul'); list.className = 'tmpl-sugg-list tmpl-picker-list';
+    const preview = document.createElement('pre'); preview.className = 'tmpl-picker-preview'; preview.textContent = 'Loading preview…';
+    columns.appendChild(list); columns.appendChild(preview); modal.appendChild(columns); overlay.appendChild(modal); document.body.appendChild(overlay);
+    let filtered = [], active = 0, done = false, previewToken = 0, teardownFn = null;
+    const removeDisposer = () => { try { const at = this._state.disposers.indexOf(teardownFn); if (at >= 0) this._state.disposers.splice(at, 1); } catch (e) {} };
+    const close = async (picked) => {
+      if (done) return; done = true;
+      try { document.removeEventListener('keydown', onKey, true); } catch (e) {}
+      removeDisposer(); try { overlay.remove(); } catch (e) {}
+      if (!picked && inlineAnchor) await plugin._restoreInlineAnchor(inlineAnchor);
+      if (plugin._state.inlineAnchor === inlineAnchor) plugin._state.inlineAnchor = null;
+      if (picked) plugin.onTemplatePicked(picked, inlineAnchor ? { anchor: inlineAnchor } : {});
+    };
+    const refreshPreview = async () => {
+      const token = ++previewToken, record = filtered[active];
+      if (!record) { preview.textContent = 'No matching templates.'; return; }
+      preview.textContent = 'Rendering preview…';
+      try { const text = await plugin._dryPreview(record); if (token === previewToken) preview.textContent = text || '(empty template)'; }
+      catch (e) { if (token === previewToken) preview.textContent = 'Preview unavailable: ' + (e && e.message || e); }
+    };
+    const renderList = () => {
+      const q = search.value;
+      filtered = records.map(r => ({ r, score: plugin._fuzzyScore(plugin.tName(r), q) })).filter(x => x.score >= 0).sort((a, b) => b.score - a.score || plugin.tName(a.r).localeCompare(plugin.tName(b.r))).map(x => x.r);
+      active = Math.max(0, Math.min(active, filtered.length - 1)); list.replaceChildren();
+      filtered.forEach((r, i) => {
+        const li = document.createElement('li'); li.className = 'tmpl-sugg-item' + (i === active ? ' active' : '');
+        const name = document.createElement('div'); name.textContent = plugin.tName(r); li.appendChild(name);
+        const desc = document.createElement('small'); desc.textContent = (plugin.tVersion(r) ? 'v' + plugin.tVersion(r) + ' · ' : '') + (plugin.tContent(r) || '').replace(/\s+/g, ' ').slice(0, 70); li.appendChild(desc);
+        li.onmouseenter = () => { active = i; Array.from(list.children).forEach((n, ix) => n.classList.toggle('active', ix === active)); refreshPreview(); };
+        li.onclick = () => close(r); list.appendChild(li);
       });
-    }
+      refreshPreview();
+    };
+    const move = (delta) => { if (!filtered.length) return; active = (active + delta + filtered.length) % filtered.length; Array.from(list.children).forEach((n, i) => n.classList.toggle('active', i === active)); const node = list.children[active]; if (node && node.scrollIntoView) node.scrollIntoView({ block: 'nearest' }); refreshPreview(); };
+    const onKey = (e) => {
+      if (e.key === 'ArrowDown') { e.preventDefault(); e.stopImmediatePropagation(); move(1); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); e.stopImmediatePropagation(); move(-1); }
+      else if (e.key === 'Enter') { e.preventDefault(); e.stopImmediatePropagation(); if (filtered[active]) close(filtered[active]); }
+      else if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); close(null); }
+    };
+    search.addEventListener('input', () => { active = 0; renderList(); });
+    overlay.onclick = e => { if (e.target === overlay) close(null); };
+    document.addEventListener('keydown', onKey, true);
+    teardownFn = () => close(null); this._state.disposers.push(teardownFn);
+    renderList(); setTimeout(() => { try { search.focus(); search.setSelectionRange(search.value.length, search.value.length); } catch (e) {} }, 0);
   }
 
-  async onTemplatePicked(template) {
+  async onTemplatePicked(template, pickerOpts) {
+    pickerOpts = pickerOpts || {};
+    if (pickerOpts.anchor) await this._restoreInlineAnchor(pickerOpts.anchor, pickerOpts.anchor.prefixText || '');
     let content = await this.assembleTemplateSource(template);
     if (!content) { this.toast("Templater", "Template has no content."); return; }
 
@@ -706,6 +797,7 @@ class Plugin extends AppPlugin {
             vars: vars.defaults || {},
             empty: vars.empty || "skip",
             templateName: this.tName(template),
+            inline: !!pickerOpts.anchor,
           });
         } catch (e) {
           console.error('[Templater] render failed:', e);
@@ -713,15 +805,18 @@ class Plugin extends AppPlugin {
           return;
         }
         try {
-          await this.applyTemplate(template, rendered, { collection: chosenCollection, mode, preview: vars.preview });
+          await this.applyTemplate(template, rendered, { collection: chosenCollection, mode, preview: vars.preview, anchor: pickerOpts.anchor || null });
         } catch (e) {
           console.error('[Templater] apply failed:', e);
           this.toast("Apply failed", String(e && e.message || e));
         }
       };
-      if (!prompts.length) finalize({});
+      if (!prompts.length) await finalize({});
       else this.openPromptsModal(template, prompts, finalize);
     };
+
+    // Inline insertion owns its positional target; authored append/update triggers do not redirect it.
+    if (pickerOpts.anchor) { await proceed(null, 'anchor'); return; }
 
     // Author-fixed Append/Update triggers still win (respect an explicitly-tagged template).
     if (appendMode) { proceed(null, 'append'); return; }
@@ -872,9 +967,109 @@ class Plugin extends AppPlugin {
     const current = (api.getConfiguration && api.getConfiguration()) || (this.getConfiguration && this.getConfiguration()) || {};
     const custom = current.custom && typeof current.custom === 'object' ? current.custom : {};
     await api.saveConfiguration(Object.assign({}, current, {
-      version: '2.46.0',
+      version: '2.47.0',
       custom: Object.assign({}, custom, { [AUTO_TITLE_RULES_KEY]: rules })
     }));
+  }
+
+  _customConfig() {
+    try {
+      const conf = this.getConfiguration && this.getConfiguration();
+      return conf && conf.custom && typeof conf.custom === 'object' ? conf.custom : {};
+    } catch (e) { return {}; }
+  }
+
+  _collectionDefaults() {
+    const value = this._customConfig()[COLLECTION_DEFAULTS_KEY];
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  }
+
+  _inlineTrigger() {
+    const custom = this._customConfig();
+    const value = Object.prototype.hasOwnProperty.call(custom, INLINE_TRIGGER_KEY) ? custom[INLINE_TRIGGER_KEY] : ';;';
+    if (value === false) return false;
+    const text = String(value || '');
+    return text.length >= 2 && text.length <= 3 ? text : ';;';
+  }
+
+  async _saveCustomConfigPatch(patch) {
+    const api = await this._ownConfigApi();
+    if (!api) throw new Error('Templater configuration is not writable on this Thymer build.');
+    const current = (api.getConfiguration && api.getConfiguration()) || (this.getConfiguration && this.getConfiguration()) || {};
+    const custom = current.custom && typeof current.custom === 'object' ? current.custom : {};
+    await api.saveConfiguration(Object.assign({}, current, {
+      version: '2.47.0',
+      custom: Object.assign({}, custom, patch || {})
+    }));
+  }
+
+  async openSettingsPanel() {
+    try {
+      const active = this.ui.getActivePanel && this.ui.getActivePanel();
+      const panel = await this.ui.createPanel(active ? { afterPanel: active } : undefined);
+      if (panel) await panel.navigateToCustomType(SETTINGS_PANEL_TYPE);
+    } catch (e) { this.toast('Templater', 'Could not open settings: ' + (e && e.message || e)); }
+  }
+
+  async renderSettingsPanel(root) {
+    root.classList.add('tmpl-auto-title-panel');
+    root.textContent = 'Loading collections and templates…';
+    let collections = [], templates = [];
+    try { collections = await this.data.getAllCollections(); } catch (e) {}
+    try { templates = await this.loadTemplatesSorted() || []; } catch (e) {}
+    collections = (collections || []).filter(c => {
+      try { const n = c.getName && c.getName(); return n && n !== TEMPLATES_COLL && !AUDIT_COLL_CANDIDATES.includes(n); } catch (e) { return false; }
+    }).sort((a, b) => (a.getName() || '').localeCompare(b.getName() || ''));
+    if (!root.isConnected) return;
+    root.replaceChildren();
+
+    const title = document.createElement('h2'); title.textContent = 'Templater settings'; root.appendChild(title);
+    const intro = document.createElement('p'); intro.className = 'tmpl-auto-title-help'; intro.textContent = 'Choose a headless default template for newly-created empty records, and configure the inline insertion trigger.'; root.appendChild(intro);
+    const status = document.createElement('div'); status.className = 'tmpl-auto-title-status';
+    const setStatus = (message, error) => { status.textContent = message || ''; status.classList.toggle('is-error', !!error); };
+
+    const section = document.createElement('h3'); section.textContent = 'Per-collection default template'; root.appendChild(section);
+    const collLabel = document.createElement('label'); collLabel.className = 'tmpl-auto-title-label'; collLabel.textContent = 'Collection'; root.appendChild(collLabel);
+    const collSelect = document.createElement('select'); collSelect.className = 'tmpl-auto-title-input';
+    for (const c of collections) { const o = document.createElement('option'); o.value = c.getGuid(); o.textContent = c.getName(); collSelect.appendChild(o); }
+    root.appendChild(collSelect);
+    const tplLabel = document.createElement('label'); tplLabel.className = 'tmpl-auto-title-label'; tplLabel.textContent = 'Default template'; root.appendChild(tplLabel);
+    const tplSelect = document.createElement('select'); tplSelect.className = 'tmpl-auto-title-input';
+    const none = document.createElement('option'); none.value = ''; none.textContent = '— none —'; tplSelect.appendChild(none);
+    for (const t of templates) { const o = document.createElement('option'); o.value = this.tName(t); o.textContent = this.tName(t); tplSelect.appendChild(o); }
+    root.appendChild(tplSelect);
+    const defaults = this._collectionDefaults();
+    const syncDefault = () => { tplSelect.value = defaults[collSelect.value] || ''; };
+    collSelect.onchange = syncDefault; syncDefault();
+    const defaultActions = document.createElement('div'); defaultActions.className = 'tmpl-auto-title-actions';
+    const saveDefault = document.createElement('button'); saveDefault.className = 'tmpl-btn primary'; saveDefault.textContent = 'Save default'; defaultActions.appendChild(saveDefault); root.appendChild(defaultActions);
+    saveDefault.onclick = async () => {
+      saveDefault.disabled = true; setStatus('Saving…', false);
+      try {
+        const next = Object.assign({}, this._collectionDefaults());
+        if (tplSelect.value) next[collSelect.value] = tplSelect.value; else delete next[collSelect.value];
+        await this._saveCustomConfigPatch({ [COLLECTION_DEFAULTS_KEY]: next });
+        Object.keys(defaults).forEach(k => delete defaults[k]); Object.assign(defaults, next);
+        setStatus(tplSelect.value ? 'Default saved.' : 'Default removed.', false);
+      } catch (e) { setStatus('Could not save: ' + (e && e.message || e), true); }
+      saveDefault.disabled = false;
+    };
+
+    const inlineSection = document.createElement('h3'); inlineSection.textContent = 'Inline trigger'; inlineSection.style.marginTop = '28px'; root.appendChild(inlineSection);
+    const inlineHelp = document.createElement('p'); inlineHelp.className = 'tmpl-auto-title-help'; inlineHelp.textContent = 'Type the trigger at the end of any line to fuzzy-search templates and insert blocks at that position. Use one extra final character to escape it literally.'; root.appendChild(inlineHelp);
+    const inlineLabel = document.createElement('label'); inlineLabel.className = 'tmpl-auto-title-label'; inlineLabel.textContent = 'Trigger (2–3 characters; blank disables)'; root.appendChild(inlineLabel);
+    const inlineInput = document.createElement('input'); inlineInput.className = 'tmpl-auto-title-input'; inlineInput.type = 'text'; inlineInput.maxLength = 3; inlineInput.value = this._inlineTrigger() || ''; this.attachInputGuards(inlineInput); root.appendChild(inlineInput);
+    const inlineActions = document.createElement('div'); inlineActions.className = 'tmpl-auto-title-actions';
+    const saveInline = document.createElement('button'); saveInline.className = 'tmpl-btn primary'; saveInline.textContent = 'Save inline trigger'; inlineActions.appendChild(saveInline); root.appendChild(inlineActions);
+    saveInline.onclick = async () => {
+      const value = inlineInput.value;
+      if (value && (value.length < 2 || value.length > 3)) { setStatus('Trigger must be 2–3 characters, or blank to disable.', true); return; }
+      saveInline.disabled = true; setStatus('Saving…', false);
+      try { await this._saveCustomConfigPatch({ [INLINE_TRIGGER_KEY]: value || false }); setStatus(value ? ('Inline trigger set to ' + value) : 'Inline trigger disabled.', false); }
+      catch (e) { setStatus('Could not save: ' + (e && e.message || e), true); }
+      saveInline.disabled = false;
+    };
+    root.appendChild(status);
   }
 
   async openAutoTitleRulesPanel() {
@@ -1148,6 +1343,14 @@ ${renderTemplaterAutoTitle.toString()}
         seen.get(label).choices = choices;
       }
     }
+    // Roam-style alias: {{suggester:Label|a,b,c}} -> prompt.choice.
+    const suggesterRe = /\{\{suggester:([^}|]+?)\|([^}]*?)\}\}/g;
+    while ((m = suggesterRe.exec(stripped)) !== null) {
+      const label = m[1].trim();
+      const choices = m[2].split(',').map(s => s.trim()).filter(Boolean);
+      if (!seen.has(label)) seen.set(label, { defaultValue: choices[0] || (defaults && defaults[label]) || '', choices });
+      else if (choices.length && !(seen.get(label).choices || []).length) seen.get(label).choices = choices;
+    }
     // Record-reference prompts: {{prompt.record:LABEL :: Collection}} (single) or
     // {{prompt.records:LABEL :: Collection}} (MANY -> multi-select). Dropdown of that
     // collection's records; resolves to clickable ref(s) / a relation in a record property.
@@ -1160,6 +1363,15 @@ ${renderTemplaterAutoTitle.toString()}
       if (!seen.has(label)) seen.set(label, { defaultValue: "", choices: [], recordCollection, multi });
       else { const sv = seen.get(label); if (recordCollection && !sv.recordCollection) sv.recordCollection = recordCollection; if (multi) sv.multi = true; }
     }
+    // Date prompts: {{prompt.date:LABEL ?? YYYY-MM-DD}}.
+    const dateRe = /\{\{prompt\.date:([^}]+?)\}\}/g;
+    while ((m = dateRe.exec(stripped)) !== null) {
+      const parts = m[1].trim().split(/\s*\?\?\s*/);
+      const label = parts[0].trim();
+      const dflt = parts[1] !== undefined ? parts[1].trim() : ((defaults && defaults[label]) || '');
+      if (!seen.has(label)) seen.set(label, { defaultValue: dflt, choices: [], kind: 'date' });
+      else seen.get(label).kind = 'date';
+    }
     // Plain prompts: {{prompt:LABEL ?? def}}
     const re = /\{\{prompt:([^}]+?)\}\}/g;
     while ((m = re.exec(stripped)) !== null) {
@@ -1170,7 +1382,56 @@ ${renderTemplaterAutoTitle.toString()}
         seen.set(label, { defaultValue: dflt, choices: [] });
       }
     }
-    return Array.from(seen, ([label, v]) => ({ label, defaultValue: v.defaultValue, choices: v.choices || [], recordCollection: v.recordCollection || "", multi: v.multi || false }));
+    return Array.from(seen, ([label, v]) => ({ label, defaultValue: v.defaultValue, choices: v.choices || [], recordCollection: v.recordCollection || "", multi: v.multi || false, kind: v.kind || 'text' }));
+  }
+
+  _localIso(date) {
+    const d = date instanceof Date ? new Date(date) : new Date(date || Date.now());
+    const safe = isNaN(d.getTime()) ? new Date() : d;
+    return safe.getFullYear() + '-' + String(safe.getMonth() + 1).padStart(2, '0') + '-' + String(safe.getDate()).padStart(2, '0');
+  }
+
+  _journalDate(ctx, offset) {
+    let date = new Date(), userGuid = '';
+    try {
+      const details = ctx && ctx.record && ctx.record.getJournalDetails && ctx.record.getJournalDetails();
+      if (details && details.date) date = new Date(details.date);
+      if (details && details.userGuid) userGuid = details.userGuid;
+    } catch (e) {}
+    if (!userGuid) {
+      try {
+        const users = this.data && this.data.getActiveUsers && this.data.getActiveUsers();
+        const user = users && users[0];
+        userGuid = user && (user.guid || (user.getGuid && user.getGuid())) || '';
+      } catch (e) {}
+    }
+    date.setHours(12, 0, 0, 0);
+    date.setDate(date.getDate() + (Number(offset) || 0));
+    return { date, iso: this._localIso(date), userGuid };
+  }
+
+  _journalGuidFor(dateInfo) {
+    if (!dateInfo || !dateInfo.userGuid) return '';
+    return 'S-' + JOURNAL_COLL_GUID + '-' + dateInfo.userGuid + '-0-' + dateInfo.iso.replace(/-/g, '');
+  }
+
+  async _carryRefs(ctx) {
+    const yesterday = this._journalDate(ctx, -1);
+    let result = null;
+    try { result = await this.data.searchByQuery('@task @todo', 500); } catch (e) { return ''; }
+    const lines = Array.isArray(result) ? result : (result && result.lines) || [];
+    const refs = [];
+    for (const line of lines) {
+      if (!line || refs.length >= 20) break;
+      let record = null;
+      try { record = line.getRecord ? await line.getRecord() : line.record; } catch (e) {}
+      let details = null; try { details = record && record.getJournalDetails && record.getJournalDetails(); } catch (e) {}
+      if (!details || !details.date || this._localIso(details.date) !== yesterday.iso) continue;
+      const guid = line.guid || (line.getGuid && line.getGuid()); if (!guid) continue;
+      const label = this._segmentsToText(line.segments || []).trim() || 'Unfinished task';
+      refs.push('- ' + M_OPEN + 'REF' + M_SEP + guid + M_SEP + label + M_CLOSE);
+    }
+    return refs.join('\n');
   }
 
   // ========================================================================
@@ -1217,21 +1478,46 @@ ${renderTemplaterAutoTitle.toString()}
       async (_, cond, yes, no) => (await evalCond(cond)) ? yes : (no || ''));
   }
 
-  async renderTemplate(content, ctx) {
+  async renderTemplate(content, ctx, renderOpts) {
+    ctx = ctx || {};
+    const dry = !!((renderOpts && renderOpts.dry) || ctx.dry);
     let out = await this.resolveConditionals(content, ctx);   // 10X-#7: conditionals first — dropped branches never render
 
     // {{prompt.choice:LABEL :: opts}} -> the picked value (shares the LABEL prompt answer).
     // Resolved before the plain {{prompt:...}} rule so the `.choice` form is consumed first.
     out = out.replace(/\{\{prompt\.choice:([^}]+?)\}\}/g, (_, body) => {
       const label = body.split(/\s*::\s*/)[0].trim();
+      if (dry) return '⟨' + label + '⟩';
       const v = ctx.prompts && ctx.prompts[label];
       return (v != null && v !== "") ? v : "";
+    });
+
+    out = out.replace(/\{\{suggester:([^}|]+?)\|[^}]*?\}\}/g, (_, label) => {
+      label = label.trim();
+      if (dry) return '⟨' + label + '⟩';
+      const v = ctx.prompts && ctx.prompts[label];
+      return (v != null && v !== '') ? v : '';
+    });
+
+    // Date input becomes a native datetime marker only when it is the line's complete text run.
+    // Inside prose/frontmatter it stays ISO text so a sentence is not split by a date chip.
+    out = out.replace(/\{\{prompt\.date:([^}]+?)\}\}/g, (full, body, offset, whole) => {
+      const parts = body.split(/\s*\?\?\s*/); const label = parts[0].trim();
+      if (dry) return '⟨' + label + '⟩';
+      let value = ctx.prompts && ctx.prompts[label];
+      if (value == null || value === '') value = parts[1] !== undefined ? parts[1].trim() : '';
+      value = String(value || '').trim(); if (!value) return '';
+      const start = whole.lastIndexOf('\n', offset - 1) + 1;
+      let end = whole.indexOf('\n', offset + full.length); if (end < 0) end = whole.length;
+      const run = whole.slice(start, end).trim().replace(/^(?:#{1,6}|>|[-*+]\s*(?:\[[ xX]\])?|\d+\.)\s*/, '').trim();
+      return run === full ? (M_OPEN + 'DATE' + M_SEP + value + M_CLOSE) : value;
     });
 
     // {{prompt:LABEL ?? def}}  (an array value, from a multi-record prompt, joins with ', ')
     out = out.replace(/\{\{prompt:([^}]+?)\}\}/g, (_, body) => {
       const [labelPart, defPart] = body.split(/\s*\?\?\s*/);
       const label = labelPart.trim();
+      if (dry) return '⟨' + label + '⟩';
       const v = ctx.prompts && ctx.prompts[label];
       if (Array.isArray(v)) return v.join(', ');
       if (v != null && v !== "") return v;
@@ -1242,6 +1528,7 @@ ${renderTemplaterAutoTitle.toString()}
     // marker(s) for the picked record(s), concatenated so a frontmatter relation captures all guids.
     out = await this.replaceAsync(out, /\{\{prompt\.record(s)?:([^}]+?)\}\}/g, async (_, plural, body) => {
       const label = body.split(/\s*::\s*/)[0].trim();
+      if (dry) return '⟨' + label + '⟩';
       const v = ctx.prompts && ctx.prompts[label];
       const names = Array.isArray(v) ? v : (v == null || v === "" ? [] : [v]);
       let outRefs = "";
@@ -1275,11 +1562,29 @@ ${renderTemplaterAutoTitle.toString()}
       return v == null ? "" : String(v);
     });
 
+    // Journal-chain links and carry-forward helpers are resolved from the TARGET journal day.
+    out = out.replace(/\{\{journal:(yesterday|tomorrow|[+-]\d+)\}\}/gi, (_, spec) => {
+      const low = String(spec).toLowerCase();
+      const offset = low === 'yesterday' ? -1 : (low === 'tomorrow' ? 1 : parseInt(low, 10));
+      const info = this._journalDate(ctx, offset);
+      const guid = this._journalGuidFor(info);
+      return guid ? (M_OPEN + 'REF' + M_SEP + guid + M_SEP + info.iso + M_CLOSE) : info.iso;
+    });
+    out = out.replace(/\{\{carry:unfinished\}\}/gi, () => {
+      const info = this._journalDate(ctx, -1);
+      return 'dc: @task and @todo and date=' + info.iso + ' | list';
+    });
+    if (/\{\{carry:refs\}\}/i.test(out)) {
+      const refs = dry ? '⟨unfinished refs⟩' : await this._carryRefs(ctx);
+      out = out.replace(/\{\{carry:refs\}\}/gi, refs);
+    }
+
     // {{date}} and {{date:FMT|natural-language}} -> survivable DATE marker (becomes a
     // datetime segment in body context; collapses to plain text in frontmatter/preview).
     // TP-12: also resolves relative-offset milestone dates ({{date:+7}}, {{date:+7@Start Date}}) — ctx-aware.
     out = out.replace(/\{\{date(?::([^}]+))?\}\}/g, (_, fmt) => {
-      const ds = this.dateStringForSegment(fmt, ctx);
+      let ds = this.dateStringForSegment(fmt, ctx);
+      if (dry) ds = this._dryDateString(ds);
       return M_OPEN + "DATE" + M_SEP + ds + M_CLOSE;
     });
 
@@ -1298,13 +1603,16 @@ ${renderTemplaterAutoTitle.toString()}
     });
 
     // TP-1 alias: {{schedule:…}} / {{datetime:…}} behave like {{date:…}} (a real datetime segment that schedules).
-    out = out.replace(/\{\{(?:schedule|datetime):([^}]+)\}\}/g, (_, fmt) => M_OPEN + "DATE" + M_SEP + this.dateStringForSegment(fmt) + M_CLOSE);
+    out = out.replace(/\{\{(?:schedule|datetime):([^}]+)\}\}/g, (_, fmt) => {
+      let ds = this.dateStringForSegment(fmt, ctx); if (dry) ds = this._dryDateString(ds);
+      return M_OPEN + "DATE" + M_SEP + ds + M_CLOSE;
+    });
 
     // TP-3: {{cursor}} -> a marker; the line carrying it is navigated-to (highlighted) after apply.
-    out = out.replace(/\{\{cursor\}\}/g, '<!--PLEXUS-CURSOR-->');
+    out = out.replace(/\{\{cursor(?::([2-9]))?\}\}/g, (_, stop) => dry ? '' : ('<!--PLEXUS-CURSOR:' + (stop || '1') + '-->'));
 
     // TS-10: {{banner:URL}} -> a directive; the image is fetched + set as the new record's banner after apply.
-    out = out.replace(/\{\{banner:(https?:\/\/[^}]+)\}\}/g, (_, url) => `<!--PLEXUS-BANNER:${url.trim()}-->`);
+    out = out.replace(/\{\{banner:(https?:\/\/[^}]+)\}\}/g, (_, url) => dry ? '' : (ctx.inline ? '<!--PLEXUS-INLINE-SKIPPED-->' : `<!--PLEXUS-BANNER:${url.trim()}-->`));
 
     // TS-3: {{relate:Field=Name}} -> a directive that sets a typed record-RELATION property after create (the new
     // record drops straight into the Plexus Brain graph). Resolved to the target GUID here.
@@ -1312,6 +1620,8 @@ ${renderTemplaterAutoTitle.toString()}
     // creates the target when missing, then (optionally) merge-applies a template onto it, so one
     // apply can scaffold a whole linked subgraph. apply is depth-capped via __chainDepth.
     out = await this.replaceAsync(out, /\{\{relate:([^=}]+)=([^}]+)\}\}/g, async (_, field, spec) => {
+      if (dry) return '';
+      if (ctx.inline) return '<!--PLEXUS-INLINE-SKIPPED-->';
       const parts = String(spec).split(/\s*::\s*/);
       const nameOrGuid = parts[0].trim();
       let createColl = null, applyTmpl = null;
@@ -1331,6 +1641,7 @@ ${renderTemplaterAutoTitle.toString()}
     // Plugin-side fetch (the <%* %> blocklist only gates the sandbox). Best-effort: a down proxy
     // resolves to '' so the rest of the template still applies.
     out = await this.replaceAsync(out, /\{\{ai::\s*([\s\S]+?)\}\}/g, async (_, instr) => {
+      if (dry) return '⟨ai⟩';
       const t = await this._llm(String(instr).trim(), false);
       return (t && t.text != null) ? String(t.text).trim() : '';
     });
@@ -1339,7 +1650,7 @@ ${renderTemplaterAutoTitle.toString()}
     // A directive that becomes a real Rich Tasks RECORD after apply (linked to the new record),
     // NOT a body line item. The title may use {{prompt:…}} (already resolved above). Encoded so
     // commas/pipes survive into the post-apply spawner; stripped from the body before it is written.
-    out = out.replace(/\{\{task:([^}]+?)\}\}/g, (_, body) => '<!--TMPL-TASK:' + encodeURIComponent(body.trim()) + '-->');
+    out = out.replace(/\{\{task:([^}]+?)\}\}/g, (_, body) => dry ? '' : '<!--TMPL-TASK:' + encodeURIComponent(body.trim()) + '-->');
 
     // {{attr:Key}} / {{attr:Key:latest|avg|avgN|trend|min|max|sum|count}} -> a LIVE value pulled from the
     // Attributes collection (the Attributes Engine plugin's index). Lets weekly-review templates auto-embed
@@ -1350,6 +1661,7 @@ ${renderTemplaterAutoTitle.toString()}
 
     // <%* js %> sandbox (async tp.* namespace)
     out = await this.replaceAsync(out, /<%\*([\s\S]*?)%>/g, async (_, code) => {
+      if (dry) return '⟨js⟩';
       return await this.runJsBlock(code, ctx);
     });
 
@@ -1359,8 +1671,15 @@ ${renderTemplaterAutoTitle.toString()}
     // markers (<%- … -%>, <%_ … _%>) and the <%+ dynamic marker (evaluated once — Thymer bodies are
     // live documents, so "dynamic" re-render doesn't apply). runJsBlock auto-wraps bare expressions.
     out = await this.replaceAsync(out, /<%(?!\*)[-_+]?([\s\S]*?)[-_]?%>/g, async (_, code) => {
+      if (dry) return '⟨js⟩';
       return await this.runJsBlock(code, ctx);
     });
+
+    if (dry) {
+      out = out.replace(/<!--(?:PLEXUS|TMPL)-[^>]*-->/gi, '');
+      out = out.replace(/\{\{include:[^}]+\}\}/g, '');
+      out = out.replace(/^\s*plexus\s*:.*(?:\n|$)/gmi, '');
+    }
 
     return out;
   }
@@ -1460,6 +1779,16 @@ ${renderTemplaterAutoTitle.toString()}
     d.setDate(d.getDate() + (n || 0));
     const y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, '0'), da = String(d.getDate()).padStart(2, '0');
     return `${y}-${m}-${da}`;
+  }
+  _dryDateString(value) {
+    const text = String(value || '').trim();
+    if (/^\d{4}-\d{2}-\d{2}/.test(text)) return text;
+    const low = text.toLowerCase();
+    if (low === 'today' || low === 'tomorrow' || low === 'yesterday') {
+      const d = new Date(); d.setHours(12, 0, 0, 0); d.setDate(d.getDate() + (low === 'tomorrow' ? 1 : (low === 'yesterday' ? -1 : 0))); return this._localIso(d);
+    }
+    try { if (typeof DateTime !== 'undefined' && DateTime.parseDateTimeString) { const dt = DateTime.parseDateTimeString(text); const d = dt && dt.toDate && dt.toDate(); if (d) return this._localIso(d); } } catch (e) {}
+    return text;
   }
 
   formatDate(d, fmt) {
@@ -1879,7 +2208,7 @@ ${renderTemplaterAutoTitle.toString()}
     modal.className = 'tmpl-modal';
     modal.innerHTML = `<h2>Apply: ${this.escape(tName)}</h2><div class="tmpl-sub">${prompts.length} variable${prompts.length === 1 ? '' : 's'} to fill in</div>`;
     const fields = [];
-    prompts.forEach(({ label, defaultValue, choices, multi, recordCollection }) => {
+    prompts.forEach(({ label, defaultValue, choices, multi, recordCollection, kind }) => {
       const wrap = document.createElement('div');
       wrap.className = 'tmpl-field';
       const labelEl = document.createElement('label');
@@ -1912,12 +2241,12 @@ ${renderTemplaterAutoTitle.toString()}
         const low = label.toLowerCase();
         const isLong = low.includes('description') || low.includes('details') || low.includes('notes') || label.length > 30;
         input = document.createElement(isLong ? 'textarea' : 'input');
-        if (!isLong) input.type = 'text';
+        if (!isLong) input.type = kind === 'date' ? 'date' : 'text';
         if (defaultValue) input.value = defaultValue;
         this.attachInputGuards(input);
       }
       wrap.appendChild(input);
-      fields.push({ label, input, multi });
+      fields.push({ label, input, multi, kind });
       modal.appendChild(wrap);
     });
     const actions = document.createElement('div');
@@ -2425,6 +2754,8 @@ ${renderTemplaterAutoTitle.toString()}
     return [
       { key: 'prompt:', insert: '{{prompt:Label}}', caret: 'Label', hint: 'ask for text (?? default optional)' },
       { key: 'prompt.choice:', insert: '{{prompt.choice:Label :: A, B, C}}', caret: 'Label', hint: 'pick one of a list' },
+      { key: 'suggester:', insert: '{{suggester:Label|A,B,C}}', caret: 'Label', hint: 'Roam-style choice alias' },
+      { key: 'prompt.date:', insert: '{{prompt.date:Label ?? 2026-07-16}}', caret: 'Label', hint: 'date picker; segment when alone' },
       { key: 'prompt.record:', insert: '{{prompt.record:Label :: Collection}}', caret: 'Label', hint: 'pick one record' },
       { key: 'prompt.records:', insert: '{{prompt.records:Label :: Collection}}', caret: 'Label', hint: 'pick records (multi)' },
       { key: 'date', insert: '{{date}}', hint: 'today (date segment)' },
@@ -2437,6 +2768,10 @@ ${renderTemplaterAutoTitle.toString()}
       { key: 'ai::', insert: '{{ai:: instruction}}', caret: 'instruction', hint: 'inline AI text (needs /llm)' },
       { key: 'task:', insert: '{{task:Title | due=+3 days}}', caret: 'Title', hint: 'spawn a linked Rich Task' },
       { key: 'cursor', insert: '{{cursor}}', hint: 'place the cursor here after apply' },
+      { key: 'cursor:2', insert: '{{cursor:2}}', hint: 'numbered next cursor stop (2–9)' },
+      { key: 'journal:yesterday', insert: '{{journal:yesterday}}', hint: 'ref the target Journal day -1' },
+      { key: 'carry:unfinished', insert: '{{carry:unfinished}}', hint: 'live Datacore query for yesterday tasks' },
+      { key: 'carry:refs', insert: '{{carry:refs}}', hint: 'frozen refs to yesterday unfinished tasks' },
       { key: 'banner:', insert: '{{banner:https://}}', caret: 'https://', hint: 'set the record banner from a URL' },
       { key: 'relate:', insert: '{{relate:Field=Name}}', caret: 'Field', hint: 'set a relation property' },
       { key: 'include:', insert: '{{include:Template}}', caret: 'Template', hint: 'inline another template' },
@@ -2784,6 +3119,7 @@ ${renderTemplaterAutoTitle.toString()}
   }
 
   async applyTemplate(template, rendered, opts) {
+    opts = opts || {};
     const triggers = this.tTriggers(template);
     // P0: `vars` (the template's Variables JSON) is read later as {flat: vars.nest==='flat'} but was never
     // declared in this scope → ReferenceError aborted EVERY interactive apply of a body template (picker /
@@ -2799,14 +3135,16 @@ ${renderTemplaterAutoTitle.toString()}
     const triggerAppend = triggers.some(t => /^append to current record$/i.test(t));
     const triggerUpdate = triggers.some(t => /^update current record$/i.test(t));
     const optMode = opts && opts.mode;
+    const inlineMode = !!opts.anchor;
     const appendMode = optMode ? optMode === 'append' : triggerAppend;
     const updateMode = optMode ? optMode === 'update' : triggerUpdate;
     const mergeMode = optMode === 'merge';   // 10X-#8: idempotent re-apply — add only what's missing
 
     // Parse frontmatter + strip from body.
     const parsed = this.parseFrontmatter(rendered);
-    const frontmatter = parsed.frontmatter;
+    let frontmatter = parsed.frontmatter;
     let bodyAll = parsed.body;
+    const inlineHadFrontmatter = !!(frontmatter && Object.keys(frontmatter).length);
     // IO-5/TS-1 + TS-8: `plexus: hybrid|mindmap` is a DIRECTIVE (flip the new record to a drawing / build a mind map),
     // not a record property. TS-3/TS-10: collect {{relate}}/{{banner}} directive markers to apply after create.
     const plexusDir = frontmatter ? String(frontmatter.plexus || '').trim().toLowerCase() : '';
@@ -2819,6 +3157,14 @@ ${renderTemplaterAutoTitle.toString()}
     // TP-15: collect {{task:…}} directives — spawned as Rich Tasks records (linked to this record) after apply.
     const taskDirectives = []; const TASK_RE = /<!--TMPL-TASK:([^>]*?)-->/g; let _tk;
     while ((_tk = TASK_RE.exec(bodyAll)) !== null) { try { taskDirectives.push(decodeURIComponent(_tk[1])); } catch (e) { taskDirectives.push(_tk[1]); } }
+    const inlineHadDirectives = inlineHadFrontmatter || !!(plexusDir || relates.length || bannerUrl || /<!--PLEXUS-INLINE-SKIPPED-->/.test(bodyAll));
+    if (inlineMode) {
+      frontmatter = null;
+      relates.length = 0;
+      bannerUrl = null;
+      bodyAll = bodyAll.replace(/<!--PLEXUS-INLINE-SKIPPED-->/g, '');
+      if (inlineHadDirectives) this.toast('Templater', 'frontmatter skipped for inline insert');
+    }
 
     // Title: prefer an explicit frontmatter `Title:` (composed from the record's properties),
     // else fall back to the first non-empty body line. When the title comes from frontmatter,
@@ -2849,7 +3195,15 @@ ${renderTemplaterAutoTitle.toString()}
     let bodyForWrite = bodyAll;
     let targetIsJournal = false;
 
-    if (appendMode || updateMode || mergeMode) {
+    if (inlineMode) {
+      targetRecord = opts.anchor.record || (opts.anchor.recordGuid && await this.pollRecord(opts.anchor.recordGuid));
+      if (!targetRecord) { this.toast('Templater', 'Inline anchor record is no longer available.'); return; }
+      targetCollection = null;
+      targetIsJournal = this._recordApplyContext(targetRecord).isJournal;
+      try { title = (targetRecord.getName && targetRecord.getName()) || this.tName(template); } catch (e) {}
+      dropTitleLine = false;
+      bodyForWrite = bodyAll;
+    } else if (appendMode || updateMode || mergeMode) {
       // 10X-#8/#9: merge (and migration) can target a record by guid, headless — else the active one.
       let tr = activeRecord;
       if (opts && opts.recordGuid) { try { tr = await this.pollRecord(opts.recordGuid); } catch (e) { tr = null; } }
@@ -2906,6 +3260,10 @@ ${renderTemplaterAutoTitle.toString()}
       if (opts && opts.preview) { const ok = await this.openSchemaPreview(title, frontmatter, bodyForWrite, targetCollection, this.tName(template)); if (!ok) return; }
       createdNewGuid = targetCollection.createRecord(title);
       if (!createdNewGuid) throw new Error("createRecord returned no GUID");
+      this._state.templaterCreated.add(createdNewGuid);
+      this._state.applying.add(createdNewGuid);
+      setTimeout(() => { try { this._state.templaterCreated.delete(createdNewGuid); } catch (e) {} }, AUTO_COOLDOWN_MS);
+      setTimeout(() => { try { this._state.applying.delete(createdNewGuid); } catch (e) {} }, 4000);
       targetRecord = await this.pollRecord(createdNewGuid);
       if (!targetRecord) throw new Error("Could not fetch new record after createRecord");
       targetIsJournal = this._recordApplyContext(targetRecord).isJournal;
@@ -2925,7 +3283,7 @@ ${renderTemplaterAutoTitle.toString()}
     // v2.46 Auto-title rules: after frontmatter lands, compute a REAL title from the target
     // collection's canonical Templater rule. Applies to create/fill, never append/merge, and never
     // to host-owned Journal date titles. The optional collection hook below is display-only.
-    if (!targetIsJournal && (createdNewGuid || updateMode) && targetCollection) {
+    if (!inlineMode && !targetIsJournal && (createdNewGuid || updateMode) && targetCollection) {
       try {
         const ruledTitle = await this.applyAutoTitleRule(targetRecord, targetCollection);
         if (ruledTitle) title = ruledTitle;
@@ -2933,17 +3291,34 @@ ${renderTemplaterAutoTitle.toString()}
     }
 
     // Body -> native nested line items (segment-aware). Strip the directive markers first (not content).
-    if (relates.length) bodyForWrite = bodyForWrite.replace(/<!--PLEXUS-RELATE:[^>]+?-->/g, '');
-    if (bannerUrl) bodyForWrite = bodyForWrite.replace(/<!--PLEXUS-BANNER:[^>]+?-->/g, '');
+    if (relates.length || inlineMode) bodyForWrite = bodyForWrite.replace(/<!--PLEXUS-RELATE:[^>]+?-->/g, '');
+    if (bannerUrl || inlineMode) bodyForWrite = bodyForWrite.replace(/<!--PLEXUS-BANNER:[^>]+?-->/g, '');
     if (taskDirectives.length) bodyForWrite = bodyForWrite.replace(/<!--TMPL-TASK:[^>]*?-->/g, '');
     const wantPromote = /<!--PLEXUS-PROMOTE-->/i.test(bodyForWrite);
     bodyForWrite = bodyForWrite.replace(/<!--PLEXUS-PROMOTE-->/gi, '');
-    let cursorGuid = null;
+    let cursorGuids = [];
+    const cursorSeed = [];
+    // When the trigger occupied an otherwise-empty anchor line, reuse that line for the first
+    // rendered block and insert the remaining top-level blocks after it.
+    if (inlineMode && !(opts.anchor.prefixText || '').trim() && bodyForWrite.trim()) {
+      const rawLines = bodyForWrite.split('\n');
+      const firstIndex = rawLines.findIndex(line => line.trim());
+      if (firstIndex >= 0) {
+        let first = rawLines[firstIndex].trim(); const stops = [];
+        first = first.replace(/<!--PLEXUS-CURSOR:([1-9])-->/g, (_, stop) => { stops.push(parseInt(stop, 10)); return ''; }).trim();
+        let anchorLine = opts.anchor.lineItem || await this._lineItemByGuid(targetRecord, opts.anchor.afterLineGuid);
+        if (anchorLine && anchorLine.setSegments) {
+          try { await anchorLine.setSegments(this._anchorLineSegments(first)); opts.anchor.lineItem = anchorLine; } catch (e) { console.warn('[Templater] inline first-line reuse failed:', e); }
+          for (let i = 0; i < stops.length; i++) cursorSeed.push({ stop: stops[i], guid: opts.anchor.afterLineGuid, order: i });
+          rawLines.splice(firstIndex, 1); bodyForWrite = rawLines.join('\n');
+        }
+      }
+    }
     if (bodyForWrite.trim()) {
       // createLineItem(null, null, ...) prepends the first root line, so a Journal fill lands at
       // the page top; writeBody then chains siblings in author order beneath that first line.
-      cursorGuid = await this.writeBody(targetRecord, bodyForWrite, { flat: vars && vars.nest === 'flat' }); // TP-3: {{cursor}} target line
-    }
+      cursorGuids = await this.writeBody(targetRecord, bodyForWrite, { flat: vars && vars.nest === 'flat', anchor: inlineMode ? opts.anchor : null, cursorSeed });
+    } else if (cursorSeed.length) cursorGuids = cursorSeed.sort((a, b) => a.stop - b.stop || a.order - b.order).map(x => x.guid);
     if (wantPromote) this._promoteAfterApply(targetRecord);
 
     // TP-15: spawn Rich Tasks records from {{task:}} directives, each linked to the new/target record.
@@ -2971,7 +3346,7 @@ ${renderTemplaterAutoTitle.toString()}
 
     this.toast(
       "Applied: " + this.tName(template),
-      (createdNewGuid ? ("Created \"" + title + "\"") : (updateMode ? ("Updated \"" + (targetRecord.getName ? targetRecord.getName() : title) + "\"") : "Appended to current record")) +
+      (inlineMode ? 'Inserted at cursor' : (createdNewGuid ? ("Created \"" + title + "\"") : (updateMode ? ("Updated \"" + (targetRecord.getName ? targetRecord.getName() : title) + "\"") : "Appended to current record"))) +
       (targetCollection && targetCollection.getName ? (" in " + targetCollection.getName()) : "")
     );
 
@@ -2996,17 +3371,20 @@ ${renderTemplaterAutoTitle.toString()}
     } catch (e) {}
 
     // TS-8: "born as a mind map" — flip the new record into a drawing AND build a mind map from its headings.
+    let specialNavigated = false;
     if (wantMindmap && createdNewGuid) {
-      try { if (typeof window !== 'undefined' && window.__plexusCanvas && window.__plexusCanvas.mindMapFromNote) { await window.__plexusCanvas.mindMapFromNote(targetRecord.guid); return targetRecord.guid; } this.toast("Templater", "plexus: mindmap needs the Plexus Canvas plugin installed."); } catch (e) { console.warn('[Templater] mindMapFromNote failed:', e); }
+      try { if (typeof window !== 'undefined' && window.__plexusCanvas && window.__plexusCanvas.mindMapFromNote) { await window.__plexusCanvas.mindMapFromNote(targetRecord.guid); specialNavigated = true; } else this.toast("Templater", "plexus: mindmap needs the Plexus Canvas plugin installed."); } catch (e) { console.warn('[Templater] mindMapFromNote failed:', e); }
     }
     // IO-5/TS-1: "born hybrid" — flip the new record into a Plexus drawing via the cross-plugin seam.
     if (wantHybrid && createdNewGuid) {
-      try { if (typeof window !== 'undefined' && window.__plexusCanvas && window.__plexusCanvas.attachScene) { await window.__plexusCanvas.attachScene(targetRecord.guid, true); return targetRecord.guid; } this.toast("Templater", "plexus: hybrid needs the Plexus Canvas plugin installed."); } catch (e) { console.warn('[Templater] attachScene failed:', e); }
+      try { if (typeof window !== 'undefined' && window.__plexusCanvas && window.__plexusCanvas.attachScene) { await window.__plexusCanvas.attachScene(targetRecord.guid, true); specialNavigated = true; } else this.toast("Templater", "plexus: hybrid needs the Plexus Canvas plugin installed."); } catch (e) { console.warn('[Templater] attachScene failed:', e); }
     }
     // TP-3: if the template had a {{cursor}}, jump to that line (highlighted) so the user lands ready to type.
-    if (cursorGuid) {
-      try { const cp = this.ui.getActivePanel && this.ui.getActivePanel(); if (cp && cp.navigateTo) { const ok = await cp.navigateTo({ itemGuid: cursorGuid, highlight: true }); if (ok !== false) return targetRecord.guid; } } catch (e) { console.warn('[Templater] cursor nav failed:', e); }
+    if (cursorGuids.length) {
+      this._state.cursorStops = cursorGuids.length > 1 ? { recordGuid: targetRecord.guid, stops: cursorGuids, idx: 1 } : null;
+      try { const cp = this.ui.getActivePanel && this.ui.getActivePanel(); if (cp && cp.navigateTo) { const ok = await cp.navigateTo({ itemGuid: cursorGuids[0], highlight: true }); if (ok !== false) return targetRecord.guid; } } catch (e) { console.warn('[Templater] cursor nav failed:', e); }
     }
+    if (specialNavigated) return targetRecord.guid;
 
     // Navigate to the new record (GUARDRAIL #3 — await Promise<boolean>).
     if (createdNewGuid) {
@@ -3020,6 +3398,24 @@ ${renderTemplaterAutoTitle.toString()}
     }
 
     return targetRecord.guid;
+  }
+
+  async nextCursorStop() {
+    const state = this._state && this._state.cursorStops;
+    if (!state || !state.stops || state.idx >= state.stops.length) { if (this._state) this._state.cursorStops = null; this.toast('Templater', 'No remaining cursor stops.'); return false; }
+    const panel = this.ui.getActivePanel && this.ui.getActivePanel();
+    const record = panel && panel.getActiveRecord && panel.getActiveRecord();
+    const activeGuid = record && (record.guid || (record.getGuid && record.getGuid()));
+    if (activeGuid !== state.recordGuid) { this._state.cursorStops = null; return false; }
+    const index = state.idx, guid = state.stops[index];
+    try {
+      const ok = panel && panel.navigateTo ? await panel.navigateTo({ itemGuid: guid, highlight: true }) : false;
+      if (ok === false) { this._state.cursorStops = null; return false; }
+      this.toast('Templater', 'stop ' + (index + 1) + '/' + state.stops.length);
+      state.idx++;
+      if (state.idx >= state.stops.length) this._state.cursorStops = null;
+      return true;
+    } catch (e) { this._state.cursorStops = null; console.warn('[Templater] next cursor stop failed:', e); return false; }
   }
 
   // TP-15: create one Rich Tasks record from a `Title | key=val | …` directive, linked to the
@@ -3523,8 +3919,23 @@ ${renderTemplaterAutoTitle.toString()}
 
   // ----- body writer (segment-aware, nested) -----
 
+  async _lineItemByGuid(record, guid) {
+    if (!record || !guid) return null;
+    try {
+      const lines = await record.getLineItems(false);
+      return (lines || []).find(line => line && line.guid === guid) || null;
+    } catch (e) { return null; }
+  }
+
+  _anchorLineSegments(raw) {
+    let line = String(raw || '').trim();
+    line = line.replace(/^(?:#{1,6}\s+|>\s+|[-*+]\s*(?:\[[ xX]\]\s*)?|\d+\.\s*)/, '');
+    return this.parseInlineSegments(line);
+  }
+
   async writeBody(record, body, opts) {
     const flat = !!(opts && opts.flat);
+    const anchor = opts && opts.anchor;
     const lines = body.split('\n');
     // Track parents per indent LEVEL so nested bullets nest correctly. Indent is normalized
     // to a level (2 spaces or 1 tab = one level) before the stack comparison, so 2-space and
@@ -3536,7 +3947,14 @@ ${renderTemplaterAutoTitle.toString()}
     const headingStack = []; // [{size, item}] — heading outline scopes; a heading PARENTS the lines beneath it
     const ROOT = {};
     const lastChildOf = new Map();
-    let cursorGuid = null; // TP-3: the line carrying {{cursor}} (navigated-to after apply)
+    let baseParent = null, anchorAfter = null;
+    if (anchor) {
+      const recordGuid = record && (record.guid || (record.getGuid && record.getGuid()));
+      if (anchor.parentGuid && anchor.parentGuid !== recordGuid) baseParent = await this._lineItemByGuid(record, anchor.parentGuid);
+      anchorAfter = anchor.lineItem || await this._lineItemByGuid(record, anchor.afterLineGuid);
+      if (anchorAfter) lastChildOf.set(ROOT, anchorAfter);
+    }
+    const cursorStops = (opts && Array.isArray(opts.cursorSeed) ? opts.cursorSeed.slice() : []); let cursorOrder = cursorStops.length;
     for (const raw of lines) {
       if (!raw.trim()) continue;
       const indentMatch = raw.match(/^([\t ]*)/);
@@ -3544,8 +3962,8 @@ ${renderTemplaterAutoTitle.toString()}
       const spaces = indentStr.replace(/\t/g, '  ').length;
       const level = Math.floor(spaces / 2);
       let line = raw.trim();
-      let wantCursor = false;
-      if (line.includes('<!--PLEXUS-CURSOR-->')) { wantCursor = true; line = line.replace(/<!--PLEXUS-CURSOR-->/g, '').trim(); }
+      const lineStops = [];
+      line = line.replace(/<!--PLEXUS-CURSOR:([1-9])-->/g, (_, stop) => { lineStops.push(parseInt(stop, 10)); return ''; }).trim();
 
       let type = 'text';
       let content = line;
@@ -3587,17 +4005,17 @@ ${renderTemplaterAutoTitle.toString()}
         // legacy: bullets nest under bullets by indent; headings/text/quote reset to root ({"nest":"flat"})
         if (nestable) {
           while (stack.length && stack[stack.length - 1].level >= level) stack.pop();
-          parentItem = stack.length ? stack[stack.length - 1].item : null;
-        } else { stack.length = 0; }
+          parentItem = stack.length ? stack[stack.length - 1].item : baseParent;
+        } else { stack.length = 0; parentItem = baseParent; }
       } else if (type === 'heading') {
         // a heading opens an outline scope: it nests under any SHALLOWER heading, else the root.
         const size = props.heading_size;
         while (headingStack.length && headingStack[headingStack.length - 1].size >= size) headingStack.pop();
-        parentItem = headingStack.length ? headingStack[headingStack.length - 1].item : null;
+        parentItem = headingStack.length ? headingStack[headingStack.length - 1].item : baseParent;
         stack.length = 0; // new heading scope resets bullet nesting
       } else {
         // non-heading lines parent under the current heading scope (or root when no heading yet).
-        const scopeParent = headingStack.length ? headingStack[headingStack.length - 1].item : null;
+        const scopeParent = headingStack.length ? headingStack[headingStack.length - 1].item : baseParent;
         if (nestable) {
           while (stack.length && stack[stack.length - 1].level >= level) stack.pop();
           parentItem = stack.length ? stack[stack.length - 1].item : scopeParent;
@@ -3606,7 +4024,7 @@ ${renderTemplaterAutoTitle.toString()}
 
       let segments = this.parseInlineSegments(content);
       if (!segments.length) segments = [{ type: 'text', text: '' }];  // empty bullet/task still needs a segment
-      const parentKey = parentItem || ROOT;
+      const parentKey = parentItem && parentItem !== baseParent ? parentItem : ROOT;
       const afterItem = lastChildOf.get(parentKey) || null;
       let created = null;
       try {
@@ -3620,10 +4038,10 @@ ${renderTemplaterAutoTitle.toString()}
         lastChildOf.set(parentKey, created);
         if (type === 'heading' && !flat) headingStack.push({ size: props.heading_size, item: created });
         else if (nestable) stack.push({ level, item: created });
-        if (wantCursor && created.guid) cursorGuid = created.guid; // TP-3
+        if (created.guid) for (const stop of lineStops) cursorStops.push({ stop, guid: created.guid, order: cursorOrder++ });
       }
     }
-    return cursorGuid;
+    return cursorStops.sort((a, b) => a.stop - b.stop || a.order - b.order).map(x => x.guid);
   }
 
   // Segment-aware tokenizer. Emits ref / datetime / hashtag / bold / italic / code segments
@@ -3717,6 +4135,40 @@ ${renderTemplaterAutoTitle.toString()}
   // Slash /tmpl emulation
   // ========================================================================
 
+  _inlineTriggerMatch(text, trigger) {
+    if (trigger === false) return null;
+    trigger = String(trigger || ''); text = String(text || '');
+    if (trigger.length < 2 || trigger.length > 3) return null;
+    const extra = trigger.charAt(trigger.length - 1);
+    if (text.endsWith(trigger + extra)) return { escape: true, text: text.slice(0, -(trigger.length + 1)) + trigger };
+    const esc = trigger.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const cls = extra.replace(/[\\\]\-^]/g, '\\$&');
+    const match = new RegExp(esc + '([^' + cls + ']*)$').exec(text);
+    if (!match) return null;
+    return { escape: false, query: match[1] || '', prefixText: text.slice(0, match.index), originalText: text };
+  }
+
+  async _beginInlineAnchor(ev, item, match) {
+    const guid = ev.lineItemGuid;
+    let record = null;
+    try {
+      record = ev.recordGuid && this.data.getRecord && this.data.getRecord(ev.recordGuid);
+      if (record && record.then) record = await record;
+      if (!record && item && item.getRecord) record = await item.getRecord();
+    } catch (e) {}
+    if (!record || !item) { this._state.clearing.delete(guid); return; }
+    const recordGuid = ev.recordGuid || record.guid || (record.getGuid && record.getGuid());
+    const anchor = {
+      record, recordGuid, lineGuid: guid, lineItem: item,
+      parentGuid: item.parent_guid || recordGuid, afterLineGuid: guid,
+      prefixText: match.prefixText, originalText: match.originalText
+    };
+    try { if (item.setSegments) await item.setSegments([{ type: 'text', text: match.prefixText }]); } catch (e) {}
+    this._state.inlineAnchor = anchor;
+    setTimeout(() => { try { this._state.clearing.delete(guid); this._state.slashCooldown.delete(guid); } catch (e) {} }, SLASH_COOLDOWN_MS + 50);
+    this.openPicker(match.query || null, { anchor });
+  }
+
   onLineItemUpdated(ev) {
     try {
       if (!ev || !ev.hasSegments || !ev.hasSegments()) return;
@@ -3728,11 +4180,27 @@ ${renderTemplaterAutoTitle.toString()}
 
       const segs = ev.getSegments ? ev.getSegments() : null;
       if (!segs) return;
+      const joined = segs.map(s => (s && typeof s.text === 'string' ? s.text : '')).join('');
+      const inline = this._inlineTriggerMatch(joined, this._inlineTrigger());
+      if (inline) {
+        this._state.slashCooldown.set(guid, Date.now()); this._state.clearing.add(guid);
+        const li = ev.getLineItem ? ev.getLineItem() : null;
+        const handle = async item => {
+          if (inline.escape) {
+            try { if (item && item.setSegments) await item.setSegments([{ type: 'text', text: inline.text }]); } catch (e) {}
+            setTimeout(() => { try { this._state.clearing.delete(guid); this._state.slashCooldown.delete(guid); } catch (e) {} }, SLASH_COOLDOWN_MS + 50);
+            return;
+          }
+          await this._beginInlineAnchor(ev, item, inline);
+        };
+        if (li && li.then) li.then(handle).catch(() => { this._state.clearing.delete(guid); }); else handle(li);
+        return;
+      }
       // P1-2: cheap pre-check — a /tmpl slash command always begins with '/'. Skip the join+regex for ordinary
       // lines (the common case) and go straight to the now-cheap auto-title path.
       const first = (segs.length && segs[0] && typeof segs[0].text === 'string') ? segs[0].text.replace(/^\s+/, '') : '';
       if (first.charAt(0) !== '/') { this._maybeAutoTitleFromLine(ev); return; }
-      const text = segs.map(s => (s && typeof s.text === 'string' ? s.text : '')).join('').trim();
+      const text = joined.trim();
       const m = text.match(SLASH_RE);
       if (!m) { this._maybeAutoTitleFromLine(ev); return; }   // not a /tmpl slash → maybe auto-title from the body
 
@@ -3777,6 +4245,15 @@ ${renderTemplaterAutoTitle.toString()}
     st.triggerIndex = null; st.autoTitleIndex = null; st.titlePatIndex = null; st.autoIndex = null; st.bodyMembers = null;
     st.hasBodyAutoTitle = null; // re-evaluate on next keystroke (a template may have gained/lost body auto-title)
   }
+  async _recordIsEmptyForDefault(record) {
+    if (!record) return false;
+    try { const lines = await record.getLineItems(false); return !lines || lines.length === 0; } catch (e) { return false; }
+  }
+  _collectionDefaultDecision(input) {
+    input = input || {};
+    if (input.remote || input.templateCreated || input.applying || input.autoFired || input.hasTrigger || !input.defaultTemplate || !input.empty) return false;
+    return true;
+  }
   async onRecordCreated(ev) {
     try {
       if (!ev) return;
@@ -3787,6 +4264,8 @@ ${renderTemplaterAutoTitle.toString()}
       const recGuid = ev.recordGuid, collGuid = ev.collectionGuid;
       if (!recGuid || !collGuid) return;
       if (this._state.applying.has(recGuid)) return;      // the engine's own create (create-mode) → don't re-fire
+      if (this._state.clearing.has(recGuid)) return;
+      if (this._state.templaterCreated.has(recGuid)) return;
       if (this._state.autoFired.has(recGuid)) return;
 
       const collName = await this.collectionNameByGuid(collGuid);
@@ -3796,6 +4275,19 @@ ${renderTemplaterAutoTitle.toString()}
       // Unified index: legacy auto:<Coll> (Triggers) + new Trigger On: record.created:<Coll>.
       const idx = await this.getTriggerIndex();
       const tmpls = idx.byEvent['record.created'][collName] || [];
+      const defaultTemplate = this._collectionDefaults()[collGuid] || '';
+      if (!tmpls.length && defaultTemplate) {
+        const record = await this.pollRecord(recGuid);
+        const empty = await this._recordIsEmptyForDefault(record);
+        if (!this._collectionDefaultDecision({ remote, templateCreated: this._state.templaterCreated.has(recGuid), applying: this._state.applying.has(recGuid), autoFired: this._state.autoFired.has(recGuid), hasTrigger: false, defaultTemplate, empty })) return;
+        const lastRec = this._state.autoCooldown.get(recGuid) || 0;
+        if (Date.now() - lastRec < AUTO_COOLDOWN_MS) return;
+        this._state.autoFired.add(recGuid); this._state.autoCooldown.set(recGuid, Date.now());
+        setTimeout(() => { try { this._state.autoFired.delete(recGuid); this._state.autoCooldown.delete(recGuid); } catch (e) {} }, AUTO_COOLDOWN_MS);
+        const result = await this._state.applyTemplateByName(defaultTemplate, { mode: 'update', recordGuid: recGuid, prompts: {} });
+        if (result && result.error) console.warn('[Templater] collection default failed:', result.error);
+        return;
+      }
       if (!tmpls.length) return;
       if (remote) { let ok = false; try { const r = await this.data.getRecord(recGuid); if (r) ok = await this.recordHasAutoSentinel(r); } catch (e) {} if (!ok) return; }
 
@@ -4311,6 +4803,10 @@ ${renderTemplaterAutoTitle.toString()}
     try {
       const panel = ev && ev.panel; if (!panel) return;
       const rec = (panel.getActiveRecord && panel.getActiveRecord()) || null; if (!rec) return;
+      if (this._state.cursorStops) {
+        const activeGuid = rec.guid || (rec.getGuid && rec.getGuid());
+        if (activeGuid !== this._state.cursorStops.recordGuid) this._state.cursorStops = null;
+      }
       let jd = null; try { jd = rec.getJournalDetails && rec.getJournalDetails(); } catch (e) {}
       if (!jd) return;
       const idx = await this.getTriggerIndex(); const tmpls = idx.byEvent['journal.open']; if (!tmpls || !tmpls.length) return;

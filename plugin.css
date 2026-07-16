@@ -139,6 +139,23 @@
 .tmpl-sugg-item.active {
   background: var(--sidebar-bg-hover);
 }
+.tmpl-picker-modal { width: min(920px, 92vw); max-width: 920px; overflow: hidden; }
+.tmpl-picker-search {
+  box-sizing: border-box; width: 100%; margin: 10px 0 12px; padding: 9px 11px;
+  border: 1px solid var(--cards-border-color); border-radius: 7px;
+  background: var(--input-bg-color); color: var(--color-text-400); font: inherit;
+}
+.tmpl-picker-search:focus { outline: none; border-color: var(--button-primary-bg-color, #10b981); }
+.tmpl-picker-columns { display: grid; grid-template-columns: minmax(240px, 0.9fr) minmax(320px, 1.4fr); gap: 14px; min-height: 360px; }
+.tmpl-picker-list { max-height: 55vh; border-right: 1px solid var(--cards-border-color); padding-right: 8px; }
+.tmpl-picker-list small { display: block; margin-top: 2px; color: var(--color-text-600); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tmpl-picker-preview {
+  box-sizing: border-box; margin: 0; padding: 12px 14px; max-height: 55vh; overflow: auto;
+  border: 1px solid var(--cards-border-color); border-radius: 7px;
+  background: var(--cards-bg); color: var(--color-text-400); white-space: pre-wrap;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+@media (max-width: 720px) { .tmpl-picker-columns { grid-template-columns: 1fr; } .tmpl-picker-list { max-height: 24vh; border-right: 0; border-bottom: 1px solid var(--cards-border-color); } }
 
 /* v2.33 — full-control editor: body textarea, storage toggle, advanced + reference, autocomplete */
 .tmpl-modal code {
