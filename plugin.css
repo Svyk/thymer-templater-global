@@ -293,7 +293,7 @@
 .tmpl-auto-title-status { min-height: 18px; margin-top: 12px; color: var(--text-muted); font-size: 12px; }
 .tmpl-auto-title-status.is-error { color: var(--enum-red-fg, #dc2626); }
 
-/* v2.48.2 — RefX-style live inline picker. It stays below Thymer's inline
+/* v2.48.3 — RefX-style native live-line picker. It stays below Thymer's inline
    palettes (z=140) and paints as an isolated, fully opaque card. */
 .tmpl-inline-pop {
   position: fixed;

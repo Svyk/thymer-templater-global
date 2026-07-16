@@ -1,16 +1,18 @@
-// Thymer Templater v2.48.2 — Reliable inline insertion + popup preview keybind.
+// Thymer Templater v2.48.3 — Native live-line ;; snippet insertion.
 // Full template language: prompt / date / record.Prop / var.NAME / ref / tag /
 // include (recursion limit 3) / <%* async js %> with tp.* namespace + blocklist.
 // Frontmatter -> properties, title-setting, segment-aware nested body writer, all
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.48.2 loaded — reliable ;; insertion + Ctrl/Cmd+O preview.', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.48.3 loaded — native live-line ;; insertion.', 'color:#10b981;font-weight:bold');
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
 const RECURSION_LIMIT = 3;
 const SLASH_RE = /^\/tmpl(?:\s+(.+))?$/;
 const SLASH_COOLDOWN_MS = 500;
+const INLINE_SYNC_MS = 45;
+const INLINE_MISSING_GRACE_MS = 140;
 const AUTO_COOLDOWN_MS = 30000;
 const COLL_CACHE_TTL_MS = 30000;
 const GUID_RE = /^[A-Z0-9]{26}$/;
@@ -437,7 +439,7 @@ class Plugin extends AppPlugin {
       } catch (e) { return { error: String(e && e.message || e) }; }
     };
 
-    try { window.__TEMPLATER_VERSION = '2.48.2'; } catch (e) {}
+    try { window.__TEMPLATER_VERSION = '2.48.3'; } catch (e) {}
     console.log('[Templater] commands + slash + auto-apply + triggers engine registered.');
   }
 
@@ -705,6 +707,10 @@ class Plugin extends AppPlugin {
 
   async _restoreInlineAnchor(anchor, original) {
     if (!anchor) return;
+    // The native live popup never removes `;;query`, so cancel/error paths have
+    // nothing to restore. Avoid an unnecessary setSegments write that could
+    // overwrite edits made after the popup opened.
+    if (anchor.nativeInline) return;
     const guid = anchor.lineGuid;
     try { if (this._state && guid) { this._state.clearing.add(guid); this._state.slashCooldown.set(guid, Date.now()); } } catch (e) {}
     try {
@@ -1058,7 +1064,7 @@ class Plugin extends AppPlugin {
     const current = (api.getConfiguration && api.getConfiguration()) || (this.getConfiguration && this.getConfiguration()) || {};
     const custom = current.custom && typeof current.custom === 'object' ? current.custom : {};
     await api.saveConfiguration(Object.assign({}, current, {
-      version: '2.48.2',
+      version: '2.48.3',
       custom: Object.assign({}, custom, { [AUTO_TITLE_RULES_KEY]: rules })
     }));
   }
@@ -1108,7 +1114,7 @@ class Plugin extends AppPlugin {
     const current = (api.getConfiguration && api.getConfiguration()) || (this.getConfiguration && this.getConfiguration()) || {};
     const custom = current.custom && typeof current.custom === 'object' ? current.custom : {};
     await api.saveConfiguration(Object.assign({}, current, {
-      version: '2.48.2',
+      version: '2.48.3',
       custom: Object.assign({}, custom, patch || {})
     }));
   }
@@ -1166,7 +1172,7 @@ class Plugin extends AppPlugin {
     };
 
     const inlineSection = document.createElement('h3'); inlineSection.textContent = 'Inline trigger'; inlineSection.style.marginTop = '28px'; root.appendChild(inlineSection);
-    const inlineHelp = document.createElement('p'); inlineHelp.className = 'tmpl-auto-title-help'; inlineHelp.textContent = 'Type the trigger anywhere in a line for a live caret popup. One extra final character escapes it literally; disabling Live popup keeps the settled-line fallback.'; root.appendChild(inlineHelp);
+    const inlineHelp = document.createElement('p'); inlineHelp.className = 'tmpl-auto-title-help'; inlineHelp.textContent = 'Type the trigger anywhere in a line for a live caret popup. The typed trigger/query stays in the editor until you pick; disabling Live popup keeps the settled-line fallback.'; root.appendChild(inlineHelp);
     const inlineLabel = document.createElement('label'); inlineLabel.className = 'tmpl-auto-title-label'; inlineLabel.textContent = 'Trigger (2–3 characters; blank disables)'; root.appendChild(inlineLabel);
     const inlineInput = document.createElement('input'); inlineInput.className = 'tmpl-auto-title-input'; inlineInput.type = 'text'; inlineInput.maxLength = 3; inlineInput.value = this._inlineTrigger() || ''; this.attachInputGuards(inlineInput); root.appendChild(inlineInput);
     const liveRow = document.createElement('label'); liveRow.className = 'tmpl-check';
@@ -4203,14 +4209,24 @@ ${renderTemplaterAutoTitle.toString()}
     const wanted = [...(trigger + query)];
     const preferred = Number.isFinite(anchor && anchor.replaceStart) ? anchor.replaceStart : null;
     const matchesAt = (at, needle) => at >= 0 && at + needle.length <= chars.length && needle.every((ch, i) => chars[at + i] === ch);
-    if (preferred != null && matchesAt(preferred, wanted)) return { start: preferred, end: preferred + wanted.length };
-    for (let at = chars.length - wanted.length; at >= 0; at--) if (matchesAt(at, wanted)) return { start: at, end: at + wanted.length };
-    const triggerChars = [...trigger];
-    if (preferred != null && matchesAt(preferred, triggerChars)) {
-      const end = Number.isFinite(anchor && anchor.replaceEnd) ? Math.max(preferred + triggerChars.length, anchor.replaceEnd) : preferred + triggerChars.length;
-      return { start: preferred, end: Math.min(chars.length, end) };
+    if (!wanted.length) return null;
+    if (preferred == null) {
+      for (let at = chars.length - wanted.length; at >= 0; at--) if (matchesAt(at, wanted)) return { start: at, end: at + wanted.length };
+      return null;
     }
-    return null;
+    // Native trigger tracking: locate the exact span nearest the remembered
+    // offset, whether text before it was inserted or deleted. Never degrade a
+    // non-empty query to a bare trigger:
+    // pick-time replacement must prove that the exact live `;;query` survives.
+    let best = null, bestDistance = Infinity;
+    for (let at = 0; at + wanted.length <= chars.length; at++) {
+      if (!matchesAt(at, wanted)) continue;
+      const distance = Math.abs(at - preferred);
+      if (distance < bestDistance || (distance === bestDistance && at >= preferred)) {
+        best = at; bestDistance = distance;
+      }
+    }
+    return best == null ? null : { start: best, end: best + wanted.length };
   }
 
   _spliceInlineSegments(source, start, end, inserted) {
@@ -4253,19 +4269,16 @@ ${renderTemplaterAutoTitle.toString()}
     }
     try { if (this._state && guid) { this._state.clearing.add(guid); this._state.slashCooldown.set(guid, Date.now()); } } catch (e) {}
     let source = null, range = null, next = null, lastFailure = null;
-    // Attempt once with the remembered SDK object. If Thymer rejects that stale
-    // editor interaction (the v2.48.1 repro) or the editor flush overwrites it,
-    // re-resolve BOTH record and line by their remembered GUIDs and retry once.
+    // Resolve BOTH record and line by GUID before every write. The remembered
+    // SDK wrapper and originalSegments are metadata only; neither is fresh
+    // enough to authorize replacing editor text.
     for (let attempt = 0; attempt < 2; attempt++) {
       let attemptRecord = record;
-      let line = attempt === 0 ? anchor.lineItem : null;
-      if (attempt > 0) {
-        try {
-          const resolved = anchor.recordGuid && this.data && this.data.getRecord && this.data.getRecord(anchor.recordGuid);
-          attemptRecord = resolved && resolved.then ? await resolved : (resolved || record);
-        } catch (e) { attemptRecord = record; }
-      }
-      if (!line) line = await this._lineItemByGuid(attemptRecord, guid);
+      try {
+        const resolved = anchor.recordGuid && this.data && this.data.getRecord && this.data.getRecord(anchor.recordGuid);
+        attemptRecord = resolved && resolved.then ? await resolved : (resolved || record);
+      } catch (e) { attemptRecord = record; }
+      const line = await this._lineItemByGuid(attemptRecord, guid);
       if (!line || !line.setSegments) {
         lastFailure = 'The remembered ;; line no longer exists.';
         continue;
@@ -4273,7 +4286,7 @@ ${renderTemplaterAutoTitle.toString()}
 
       const liveState = this._inlineLiveStateByGuid(guid);
       let freshest = liveState ? this._inlineSegmentsFromState(liveState) : null;
-      if (!freshest || !freshest.length) freshest = (line.segments || anchor.originalSegments || []).map(s => ({ type: s.type, text: s.text }));
+      if (!freshest || !freshest.length) freshest = (line.segments || []).map(s => ({ type: s.type, text: s.text }));
       const freshRange = this._inlineRangeForSegments(freshest, anchor);
       if (!freshRange) {
         lastFailure = 'The line changed since ;; was typed; the trigger text is no longer there.';
@@ -4583,6 +4596,75 @@ ${renderTemplaterAutoTitle.toString()}
     };
   }
 
+  _inlineLiveSnapshot(popup) {
+    if (!popup || !popup.lineGuid) return null;
+    const state = this._inlineLiveStateByGuid(popup.lineGuid);
+    const segments = state ? this._inlineSegmentsFromState(state) : null;
+    if (!segments || !segments.length) return null;
+    const trigger = String(popup.trigger || this._inlineTrigger() || '');
+    if (!trigger) return null;
+    const triggerRange = this._inlineRangeForSegments(segments, {
+      trigger, query: '', replaceStart: popup.triggerStart,
+    });
+    if (!triggerRange) return null;
+
+    const chars = [...this._inlineFlatText(segments)];
+    const triggerEnd = triggerRange.end;
+    let caret = null;
+    try { caret = this._inlineCaretInfo(); } catch (e) {}
+    let end = null;
+    if (caret && caret.lineGuid === popup.lineGuid && Number.isFinite(caret.offset)) end = caret.offset;
+    else {
+      // A transient caret read can disappear while Thymer repaints. In that
+      // case retain the last proven query only if it still exists in fresh text.
+      const known = this._inlineRangeForSegments(segments, {
+        trigger, query: popup.query || '', replaceStart: popup.triggerStart,
+      });
+      if (known) end = known.end;
+    }
+    if (!Number.isFinite(end) || end < triggerEnd || end > chars.length) return null;
+    const query = chars.slice(triggerEnd, end).join('');
+    // The trigger's final character is the literal-escape delimiter. It flows
+    // through to the editor like every printable key, then closes this popup.
+    if (query.includes(trigger.charAt(trigger.length - 1))) return null;
+    return {
+      state, segments, start: triggerRange.start, end, query,
+      text: chars.join(''), caretOffset: end,
+    };
+  }
+
+  _syncInlineLiveFromLine(popup, options) {
+    if (!popup || !this._state || this._state.inlinePopup !== popup) return null;
+    const snapshot = this._inlineLiveSnapshot(popup);
+    if (!snapshot) {
+      const now = Date.now();
+      if (!popup.missingSince) popup.missingSince = now;
+      const grace = !(options && options.grace === false);
+      if (!grace || (now - popup.missingSince >= INLINE_MISSING_GRACE_MS && now - popup.openedAt >= INLINE_MISSING_GRACE_MS)) {
+        this._closeInlineLive('trigger-lost');
+      }
+      return null;
+    }
+    popup.missingSince = 0;
+    const changed = popup.query !== snapshot.query || popup.triggerStart !== snapshot.start;
+    popup.query = snapshot.query;
+    popup.triggerStart = snapshot.start;
+    popup.lastSnapshot = snapshot;
+    if (changed) {
+      popup.active = 0;
+      this._renderInlineLive();
+    }
+    return snapshot;
+  }
+
+  _scheduleInlineLiveSync(popup) {
+    if (!popup || popup.syncTimeout) return;
+    popup.syncTimeout = setTimeout(() => {
+      popup.syncTimeout = 0;
+      if (this._state && this._state.inlinePopup === popup) this._syncInlineLiveFromLine(popup);
+    }, 0);
+  }
+
   _installInlineLive() {
     if (!this._inlineLiveEnabled()) return false;
     try {
@@ -4626,26 +4708,10 @@ ${renderTemplaterAutoTitle.toString()}
       if (event.key === 'Escape') {
         event.preventDefault(); event.stopImmediatePropagation(); this._closeInlineLive('escape'); return;
       }
-      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight' || event.key === 'Home' || event.key === 'End') {
-        this._closeInlineLive('caret-moved'); return;
-      }
-      if (event.key === 'Backspace') {
-        if (!popup.query.length) { this._closeInlineLive('backspace'); return; }
-        popup.query = [...popup.query].slice(0, -1).join('');
-        popup.active = 0;
-        this._renderInlineLive(); return;
-      }
-      const triggerTail = popup.trigger.charAt(popup.trigger.length - 1);
-      if (event.key === triggerTail && !popup.query.length && !event.metaKey && !event.ctrlKey && !event.altKey) {
-        // `;;;` escape: the third key is swallowed, leaving the already-inserted
-        // `;;` literal untouched in the editor.
-        event.preventDefault(); event.stopImmediatePropagation(); this._closeInlineLive('literal-escape'); return;
-      }
-      if (event.key && event.key.length === 1 && !event.metaKey && !event.ctrlKey) {
-        popup.query += event.key;
-        popup.active = 0;
-        this._renderInlineLive();
-      }
+      // Everything else remains native editor input. After Thymer handles the
+      // key, re-read the live line and derive both the query and trigger span.
+      // This includes Backspace/Delete/caret movement and printable characters.
+      this._scheduleInlineLiveSync(popup);
       return;
     }
 
@@ -4653,7 +4719,8 @@ ${renderTemplaterAutoTitle.toString()}
     if (pending) {
       const tail = pending.trigger.charAt(pending.trigger.length - 1);
       if (event.key === tail && !pending.query.length && !event.metaKey && !event.ctrlKey && !event.altKey) {
-        event.preventDefault(); event.stopImmediatePropagation();
+        // Cancel the pending popup but let the literal character reach Thymer.
+        // Native flow consumes only picker navigation/accept/cancel commands.
         pending.cancelled = true; this._inlinePending = null; return;
       }
       if (event.key && event.key.length === 1 && !event.metaKey && !event.ctrlKey) pending.query += event.key;
@@ -4671,7 +4738,6 @@ ${renderTemplaterAutoTitle.toString()}
       trigger, query: '', lineGuid: info.lineGuid, pageGuid: info.pageGuid,
       parentGuid: info.parentGuid, triggerStart: info.offset - trigger.length + 1,
       lineNode: info.lineNode, panelEl: info.panelEl, caretEl: info.caretEl,
-      rememberedSegments: this._spliceInlineSegments(info.segments, info.offset, info.offset, [{ type: 'text', text: event.key }]),
       cancelled: false,
     };
     this._inlinePending = pendingOpen;
@@ -4729,7 +4795,12 @@ ${renderTemplaterAutoTitle.toString()}
     // Keep the fixed menu at the document paint root, outside Thymer's line
     // wrappers where inherited opacity, backdrop, or overflow can bleed through.
     document.body.appendChild(pop);
-    const popup = Object.assign({}, seed, { pop, list, queryEl: query, records: [], filtered: [], active: 0, loading: true, picking: false, previewOpen: false, previewToken: 0, previewEl: null });
+    const popup = Object.assign({}, seed, {
+      pop, list, queryEl: query, records: [], filtered: [], active: 0,
+      loading: true, picking: false, previewOpen: false, previewToken: 0,
+      previewEl: null, openedAt: Date.now(), missingSince: 0,
+      lastSnapshot: null, syncTimeout: 0, liveTimer: 0,
+    });
     const outside = event => { if (this._state.inlinePopup === popup && !pop.contains(event.target) && !(popup.previewEl && popup.previewEl.contains(event.target))) this._closeInlineLive('outside'); };
     const reposition = () => {
       if (popup.raf) return;
@@ -4741,6 +4812,12 @@ ${renderTemplaterAutoTitle.toString()}
     window.addEventListener('resize', reposition, false);
     this._state.inlinePopup = popup;
     this._renderInlineLive(); this._positionInlineLive();
+    // Keystrokes initiate immediate syncs; the lightweight poll catches model
+    // commits that land after the key task and closes if the trigger is deleted.
+    popup.liveTimer = setInterval(() => {
+      if (this._state && this._state.inlinePopup === popup) this._syncInlineLiveFromLine(popup);
+    }, INLINE_SYNC_MS);
+    this._scheduleInlineLiveSync(popup);
     this.loadTemplatesSorted().then(records => {
       if (this._state.inlinePopup !== popup) return;
       popup.records = this._inlineScopedTemplates(records || []); popup.loading = false; this._renderInlineLive();
@@ -4864,6 +4941,8 @@ ${renderTemplaterAutoTitle.toString()}
     try { window.removeEventListener('scroll', popup.reposition, true); } catch (e) {}
     try { window.removeEventListener('resize', popup.reposition, false); } catch (e) {}
     if (popup.raf) { try { cancelAnimationFrame(popup.raf); } catch (e) {} }
+    if (popup.syncTimeout) { try { clearTimeout(popup.syncTimeout); } catch (e) {} popup.syncTimeout = 0; }
+    if (popup.liveTimer) { try { clearInterval(popup.liveTimer); } catch (e) {} popup.liveTimer = 0; }
     popup.previewToken++;
     try { if (popup.previewEl) popup.previewEl.remove(); } catch (e) {}
     try { popup.pop.remove(); } catch (e) {}
@@ -4871,31 +4950,38 @@ ${renderTemplaterAutoTitle.toString()}
   }
 
   async _buildInlineLiveAnchor(popup) {
-    let source = null, range = null, state = null;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      // Resolve by the GUID remembered when ;; was typed. Picker interaction
-      // must never retarget insertion to whichever line currently owns focus.
-      state = this._inlineLiveStateByGuid(popup.lineGuid);
-      source = state ? this._inlineSegmentsFromState(state) : null;
-      if ((!source || !source.length) && Array.isArray(popup.rememberedSegments)) source = popup.rememberedSegments.map(segment => ({ type: segment.type, text: segment.text }));
-      range = source && this._inlineRangeForSegments(source, { trigger: popup.trigger, query: popup.query, replaceStart: popup.triggerStart });
-      if (range) break;
-      await new Promise(resolve => setTimeout(resolve, attempt ? 35 : 0));
-    }
-    if (!range || !source) return null;
+    if (!popup) return null;
     let record = this.data.getRecord && this.data.getRecord(popup.pageGuid);
     if (record && record.then) record = await record;
     if (!record) return null;
-    const lineItem = await this._lineItemByGuid(record, popup.lineGuid);
+    let lineItem = await this._lineItemByGuid(record, popup.lineGuid);
     if (!lineItem) return null;
+    let source = null, range = null, state = null, liveQuery = popup.query || '';
+    for (let attempt = 0; attempt < 4; attempt++) {
+      // Resolve by the GUID remembered when ;; was typed. Picker interaction
+      // must never retarget insertion to whichever line currently owns focus.
+      const snapshot = this._inlineLiveSnapshot(popup);
+      state = snapshot && snapshot.state || this._inlineLiveStateByGuid(popup.lineGuid);
+      source = snapshot ? snapshot.segments : (state ? this._inlineSegmentsFromState(state) : null);
+      if ((!source || !source.length) && lineItem.segments) source = lineItem.segments.map(segment => ({ type: segment.type, text: segment.text }));
+      liveQuery = snapshot ? snapshot.query : popup.query || '';
+      range = snapshot
+        ? { start: snapshot.start, end: snapshot.end }
+        : (source && this._inlineRangeForSegments(source, { trigger: popup.trigger, query: liveQuery, replaceStart: popup.triggerStart }));
+      if (range) break;
+      await new Promise(resolve => setTimeout(resolve, attempt ? 35 : 0));
+      lineItem = await this._lineItemByGuid(record, popup.lineGuid) || lineItem;
+    }
+    if (!range || !source) return null;
     const prefix = this._inlineFlatText(this._spliceInlineSegments(source, range.start, source.reduce((n, s) => n + this._inlineSegmentLength(s), 0), [])).replace(/\u2060/g, '');
     const remainder = this._inlineFlatText(this._spliceInlineSegments(source, range.start, range.end, [])).replace(/\u2060/g, '');
     return {
       record, recordGuid: popup.pageGuid, lineGuid: popup.lineGuid, lineItem,
       parentGuid: popup.parentGuid || state && (state.parent_guid || state.parent && state.parent.guid) || popup.pageGuid, afterLineGuid: popup.lineGuid,
-      trigger: popup.trigger, query: popup.query, replaceStart: range.start, replaceEnd: range.end,
+      trigger: popup.trigger, query: liveQuery, replaceStart: range.start, replaceEnd: range.end,
       prefixText: prefix, remainingText: remainder.trim(), originalText: this._inlineFlatText(source).replace(/\u2060/g, ''),
       originalSegments: source.map(segment => ({ type: segment.type, text: segment.text })),
+      nativeInline: true,
     };
   }
 
@@ -4904,7 +4990,9 @@ ${renderTemplaterAutoTitle.toString()}
     if (!popup || popup.picking || !popup.filtered[popup.active]) return;
     popup.picking = true;
     const template = popup.filtered[popup.active];
-    const anchor = await this._buildInlineLiveAnchor(popup);
+    let anchor = null;
+    try { anchor = await this._buildInlineLiveAnchor(popup); }
+    catch (error) { console.warn('[Templater] live inline anchor failed:', error); }
     this._closeInlineLive('picked');
     if (!anchor) { this.toast('Inline insert failed', 'The line changed since ;; was typed; nothing was inserted.'); return; }
     this._state.inlineAnchor = anchor;

@@ -44,6 +44,70 @@ const snippetTemplate = (name = 'Clip') => ({
   assert.strictEqual(spliced[spliced.length - 1].text, '#kept', 'existing suffix segments survive the splice');
   console.log('PASS v2.48 single-line splice preserves prefix/suffix and native segments');
 
+  const movedRight = [{ type: 'text', text: 'XX Before ;;meet after' }];
+  const movedLeft = [{ type: 'text', text: 'B ;;meet after' }];
+  assert.deepStrictEqual(
+    plugin._inlineRangeForSegments(movedRight, { trigger: ';;', query: 'meet', replaceStart: 7 }),
+    { start: 10, end: 16 },
+    'span search tolerates text inserted before the remembered trigger offset'
+  );
+  assert.deepStrictEqual(
+    plugin._inlineRangeForSegments(movedLeft, { trigger: ';;', query: 'meet', replaceStart: 7 }),
+    { start: 2, end: 8 },
+    'span search tolerates text deleted before the remembered trigger offset'
+  );
+  assert.strictEqual(
+    plugin._inlineRangeForSegments([{ type: 'text', text: 'Before ;; other' }], { trigger: ';;', query: 'meet', replaceStart: 7 }),
+    null,
+    'a non-empty query never degrades to a bare-trigger match'
+  );
+  console.log('PASS v2.48.3 trigger span location tolerates prefix edits without broad replacement');
+
+  const livePlugin = new Plugin();
+  const livePopup = {
+    lineGuid: 'LIVE', trigger: ';;', triggerStart: 7, query: '',
+    records: [snippetTemplate('Meeting'), snippetTemplate('Clip')],
+    active: 1, openedAt: Date.now(), missingSince: 0,
+  };
+  livePlugin._state = { inlinePopup: livePopup };
+  livePlugin._inlineLiveStateByGuid = () => ({
+    guid: 'LIVE', text_segments: ['text', 'Before ;;mee after'],
+  });
+  livePlugin._inlineCaretInfo = () => ({ lineGuid: 'LIVE', offset: 12 });
+  livePlugin._renderInlineLive = () => {
+    livePopup.filtered = livePlugin._filterInlineCandidates(livePopup.records, livePopup.query);
+  };
+  const liveSnapshot = livePlugin._syncInlineLiveFromLine(livePopup);
+  assert.strictEqual(liveSnapshot.query, 'mee');
+  assert.strictEqual(livePopup.query, 'mee', 'popup query is derived from fresh line text up to the native caret');
+  assert.deepStrictEqual(livePopup.filtered.map(record => record.getName()), ['Meeting']);
+  console.log('PASS v2.48.3 popup live-filters from the current editor line');
+
+  const escPlugin = new Plugin();
+  let escWrites = 0, escRemoved = 0;
+  const escLine = {
+    segments: [{ type: 'text', text: 'Keep ;;typed exactly' }],
+    setSegments: async () => { escWrites++; },
+  };
+  const escPopup = {
+    lineItem: escLine, query: 'typed', filtered: [], previewToken: 0,
+    pop: { remove: () => { escRemoved++; } }, previewEl: null,
+    outside: null, reposition: null, raf: 0, syncTimeout: 0, liveTimer: 0,
+  };
+  escPlugin._state = { inlinePopup: escPopup };
+  let prevented = 0, stopped = 0;
+  escPlugin._onInlineLiveKey({
+    key: 'Escape', target: null, isComposing: false,
+    preventDefault: () => { prevented++; }, stopImmediatePropagation: () => { stopped++; },
+  });
+  assert.strictEqual(escWrites, 0, 'Escape never restores or rewrites the editor line');
+  assert.strictEqual(escLine.segments[0].text, 'Keep ;;typed exactly');
+  assert.strictEqual(escRemoved, 1);
+  assert.deepStrictEqual([prevented, stopped], [1, 1]);
+  await escPlugin._restoreInlineAnchor({ nativeInline: true, lineItem: escLine });
+  assert.strictEqual(escWrites, 0, 'native cancel/error cleanup has no restore write');
+  console.log('PASS v2.48.3 Escape closes the popup and leaves typed text untouched');
+
   const cursorLine = {
     guid: 'CURSOR', parent_guid: 'REC', segments: [{ type: 'text', text: 'A ;;clip Z' }],
     setSegments: async segments => { cursorLine.segments = segments; return true; },
@@ -62,6 +126,19 @@ const snippetTemplate = (name = 'Clip') => ({
   assert.strictEqual(cursorLine.segments.map(segment => segment.text).join(''), 'A go here Z');
   assert.deepStrictEqual(cursorStops, { stops: [3], segments: cursorLine.segments });
   console.log('PASS v2.48 single-line inline cursor stop survives the splice');
+
+  const shiftedLine = {
+    guid: 'SHIFTED', parent_guid: 'REC', segments: [{ type: 'text', text: 'XX A ;;clip Z' }],
+    setSegments: async segments => { shiftedLine.segments = segments; return true; },
+  };
+  const shiftedRecord = { guid: 'REC', getLineItems: async () => [shiftedLine] };
+  await plugin._applyInlineAnchorLine(shiftedRecord, {
+    record: shiftedRecord, recordGuid: 'REC', lineGuid: 'SHIFTED', lineItem: shiftedLine,
+    trigger: ';;', query: 'clip', replaceStart: 2, replaceEnd: 8,
+    originalSegments: [{ type: 'text', text: 'A ;;clip Z' }],
+  }, 'picked');
+  assert.strictEqual(shiftedLine.segments.map(segment => segment.text).join(''), 'XX A picked Z');
+  console.log('PASS v2.48.3 pick replaces only the fresh trigger span');
 
   const retryPlugin = new Plugin();
   retryPlugin._state = { clearing: new Set(), slashCooldown: new Map() };
@@ -84,11 +161,11 @@ const snippetTemplate = (name = 'Clip') => ({
     originalSegments: staleLine.segments,
   };
   await retryPlugin._applyInlineAnchorLine(staleRecord, retryAnchor, 'inserted');
-  assert.strictEqual(staleWrites, 1, 'the remembered stale line is attempted once');
-  assert.strictEqual(freshWrites, 1, 'one retry writes through a freshly resolved line object');
-  assert.strictEqual(retryAnchor.lineItem, freshLine, 'successful retry refreshes the remembered anchor object');
+  assert.strictEqual(staleWrites, 0, 'the remembered stale line object is never used as write authority');
+  assert.strictEqual(freshWrites, 1, 'the first write uses a freshly resolved line object');
+  assert.strictEqual(retryAnchor.lineItem, freshLine, 'successful write refreshes the remembered anchor object');
   assert.strictEqual(freshLine.segments.map(segment => segment.text).join(''), 'Before inserted after');
-  console.log('PASS v2.48.2 stale inline anchor re-resolves once after Editor interaction failed');
+  console.log('PASS v2.48.3 stale inline anchor resolves fresh before the first write');
 
   const changedLine = { guid: 'CHANGED', segments: [{ type: 'text', text: 'user edited this line' }], setSegments: async () => true };
   const changedRecord = { guid: 'REC2', getLineItems: async () => [changedLine] };
