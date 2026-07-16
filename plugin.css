@@ -293,7 +293,7 @@
 .tmpl-auto-title-status { min-height: 18px; margin-top: 12px; color: var(--text-muted); font-size: 12px; }
 .tmpl-auto-title-status.is-error { color: var(--enum-red-fg, #dc2626); }
 
-/* v2.48.1 — RefX-style live inline picker. It stays below Thymer's inline
+/* v2.48.2 — RefX-style live inline picker. It stays below Thymer's inline
    palettes (z=140) and paints as an isolated, fully opaque card. */
 .tmpl-inline-pop {
   position: fixed;
@@ -343,3 +343,24 @@
 .tmpl-inline-empty,
 .tmpl-inline-hint { padding: 8px; color: var(--text-muted); font-size: 11px; }
 .tmpl-inline-hint { border-top: 1px solid var(--border-default); }
+.tmpl-inline-preview {
+  position: fixed;
+  z-index: 130;
+  box-sizing: border-box;
+  min-width: 240px;
+  max-width: min(360px, calc(100vw - 16px));
+  max-height: min(420px, calc(100vh - 16px));
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--cards-border-color);
+  border-radius: 8px;
+  background: var(--cards-bg);
+  box-shadow: 0 8px 24px rgba(0,0,0,.35);
+  color: inherit;
+  opacity: 1;
+  white-space: pre-wrap;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.tmpl-picker-columns.preview-closed { grid-template-columns: 1fr; }
+.tmpl-picker-columns.preview-closed .tmpl-picker-list { border-right: 0; padding-right: 0; }

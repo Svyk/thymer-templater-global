@@ -63,6 +63,53 @@ const snippetTemplate = (name = 'Clip') => ({
   assert.deepStrictEqual(cursorStops, { stops: [3], segments: cursorLine.segments });
   console.log('PASS v2.48 single-line inline cursor stop survives the splice');
 
+  const retryPlugin = new Plugin();
+  retryPlugin._state = { clearing: new Set(), slashCooldown: new Map() };
+  let staleWrites = 0, freshWrites = 0;
+  const staleLine = {
+    guid: 'RETRY', segments: [{ type: 'text', text: 'Before ;;clip after' }],
+    setSegments: async () => { staleWrites++; throw new Error('Editor interaction failed'); },
+  };
+  const freshLine = {
+    guid: 'RETRY', segments: [{ type: 'text', text: 'Before ;;clip after' }],
+    setSegments: async segments => { freshWrites++; freshLine.segments = segments; return true; },
+  };
+  const staleRecord = { guid: 'REC', getLineItems: async () => [staleLine] };
+  const freshRecord = { guid: 'REC', getLineItems: async () => [freshLine] };
+  retryPlugin.data = { getRecord: guid => guid === 'REC' ? freshRecord : null };
+  retryPlugin._inlineLiveStateByGuid = () => null;
+  const retryAnchor = {
+    record: staleRecord, recordGuid: 'REC', lineGuid: 'RETRY', afterLineGuid: 'RETRY', lineItem: staleLine,
+    trigger: ';;', query: 'clip', replaceStart: 7, replaceEnd: 13,
+    originalSegments: staleLine.segments,
+  };
+  await retryPlugin._applyInlineAnchorLine(staleRecord, retryAnchor, 'inserted');
+  assert.strictEqual(staleWrites, 1, 'the remembered stale line is attempted once');
+  assert.strictEqual(freshWrites, 1, 'one retry writes through a freshly resolved line object');
+  assert.strictEqual(retryAnchor.lineItem, freshLine, 'successful retry refreshes the remembered anchor object');
+  assert.strictEqual(freshLine.segments.map(segment => segment.text).join(''), 'Before inserted after');
+  console.log('PASS v2.48.2 stale inline anchor re-resolves once after Editor interaction failed');
+
+  const changedLine = { guid: 'CHANGED', segments: [{ type: 'text', text: 'user edited this line' }], setSegments: async () => true };
+  const changedRecord = { guid: 'REC2', getLineItems: async () => [changedLine] };
+  retryPlugin.data = { getRecord: () => changedRecord };
+  await assert.rejects(
+    retryPlugin._applyInlineAnchorLine(changedRecord, {
+      record: changedRecord, recordGuid: 'REC2', lineGuid: 'CHANGED', lineItem: changedLine,
+      trigger: ';;', query: 'gone', replaceStart: 0, replaceEnd: 6,
+      originalSegments: changedLine.segments,
+    }, 'nope'),
+    /line changed since ;; was typed/i
+  );
+  console.log('PASS v2.48.2 changed inline line reports a specific stale-trigger failure');
+
+  assert.strictEqual(plugin._nextPreviewOpen(false), true);
+  assert.strictEqual(plugin._nextPreviewOpen(true), false);
+  assert.strictEqual(plugin._isPreviewKey({ key: 'o', ctrlKey: true }), true);
+  assert.strictEqual(plugin._isPreviewKey({ key: 'O', metaKey: true }), true);
+  assert.strictEqual(plugin._previewLineLimit(Array.from({ length: 25 }, (_, i) => String(i)).join('\n'), 20).split('\n').length, 20);
+  console.log('PASS v2.48.2 preview toggle state, keybind, and 20-line cap');
+
   const anchorLine = {
     guid: 'ANCHOR', parent_guid: 'REC', segments: [{ type: 'text', text: 'Prefix ;;q' }],
     setSegments: async segments => { anchorLine.segments = segments; return true; },

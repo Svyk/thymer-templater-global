@@ -1,11 +1,11 @@
-// Thymer Templater v2.48.1 — Opaque inline popup + snippet-only default scope.
+// Thymer Templater v2.48.2 — Reliable inline insertion + popup preview keybind.
 // Full template language: prompt / date / record.Prop / var.NAME / ref / tag /
 // include (recursion limit 3) / <%* async js %> with tp.* namespace + blocklist.
 // Frontmatter -> properties, title-setting, segment-aware nested body writer, all
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.48.1 loaded — opaque ;; popup + snippet-only default scope.', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.48.2 loaded — reliable ;; insertion + Ctrl/Cmd+O preview.', 'color:#10b981;font-weight:bold');
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
 const RECURSION_LIMIT = 3;
@@ -437,7 +437,7 @@ class Plugin extends AppPlugin {
       } catch (e) { return { error: String(e && e.message || e) }; }
     };
 
-    try { window.__TEMPLATER_VERSION = '2.48.1'; } catch (e) {}
+    try { window.__TEMPLATER_VERSION = '2.48.2'; } catch (e) {}
     console.log('[Templater] commands + slash + auto-apply + triggers engine registered.');
   }
 
@@ -693,6 +693,16 @@ class Plugin extends AppPlugin {
     return this.previewText(rendered).split('\n').slice(0, 30).join('\n');
   }
 
+  _isPreviewKey(event) {
+    return !!(event && (event.ctrlKey || event.metaKey) && !event.altKey && String(event.key || '').toLowerCase() === 'o');
+  }
+
+  _nextPreviewOpen(open) { return !open; }
+
+  _previewLineLimit(text, maxLines) {
+    return String(text == null ? '' : text).split('\n').slice(0, maxLines || 20).join('\n');
+  }
+
   async _restoreInlineAnchor(anchor, original) {
     if (!anchor) return;
     const guid = anchor.lineGuid;
@@ -739,7 +749,7 @@ class Plugin extends AppPlugin {
     const list = document.createElement('ul'); list.className = 'tmpl-sugg-list tmpl-picker-list';
     const preview = document.createElement('pre'); preview.className = 'tmpl-picker-preview'; preview.textContent = 'Loading preview…';
     columns.appendChild(list); columns.appendChild(preview); modal.appendChild(columns); overlay.appendChild(modal); document.body.appendChild(overlay);
-    let filtered = [], active = 0, done = false, previewToken = 0, teardownFn = null;
+    let filtered = [], active = 0, done = false, previewToken = 0, teardownFn = null, previewOpen = true;
     const removeDisposer = () => { try { const at = this._state.disposers.indexOf(teardownFn); if (at >= 0) this._state.disposers.splice(at, 1); } catch (e) {} };
     const close = async (picked) => {
       if (done) return; done = true;
@@ -756,6 +766,12 @@ class Plugin extends AppPlugin {
       try { const text = await plugin._dryPreview(record); if (token === previewToken) preview.textContent = text || '(empty template)'; }
       catch (e) { if (token === previewToken) preview.textContent = 'Preview unavailable: ' + (e && e.message || e); }
     };
+    const setPreviewOpen = (open) => {
+      previewOpen = !!open;
+      preview.hidden = !previewOpen;
+      columns.classList.toggle('preview-closed', !previewOpen);
+      if (previewOpen) refreshPreview();
+    };
     const renderList = () => {
       const q = search.value;
       filtered = records.map(r => ({ r, score: plugin._fuzzyScore(plugin.tName(r), q) })).filter(x => x.score >= 0).sort((a, b) => b.score - a.score || plugin.tName(a.r).localeCompare(plugin.tName(b.r))).map(x => x.r);
@@ -771,7 +787,8 @@ class Plugin extends AppPlugin {
     };
     const move = (delta) => { if (!filtered.length) return; active = (active + delta + filtered.length) % filtered.length; Array.from(list.children).forEach((n, i) => n.classList.toggle('active', i === active)); const node = list.children[active]; if (node && node.scrollIntoView) node.scrollIntoView({ block: 'nearest' }); refreshPreview(); };
     const onKey = (e) => {
-      if (e.key === 'ArrowDown') { e.preventDefault(); e.stopImmediatePropagation(); move(1); }
+      if (plugin._isPreviewKey(e)) { e.preventDefault(); e.stopImmediatePropagation(); setPreviewOpen(plugin._nextPreviewOpen(previewOpen)); }
+      else if (e.key === 'ArrowDown') { e.preventDefault(); e.stopImmediatePropagation(); move(1); }
       else if (e.key === 'ArrowUp') { e.preventDefault(); e.stopImmediatePropagation(); move(-1); }
       else if (e.key === 'Enter') { e.preventDefault(); e.stopImmediatePropagation(); if (filtered[active]) close(filtered[active]); }
       else if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); close(null); }
@@ -882,7 +899,7 @@ class Plugin extends AppPlugin {
           await this.applyTemplate(template, rendered, { collection: chosenCollection, mode, preview: vars.preview, anchor: pickerOpts.anchor || null });
         } catch (e) {
           console.error('[Templater] apply failed:', e);
-          this.toast("Apply failed", String(e && e.message || e));
+          this.toast(pickerOpts.anchor ? "Inline insert failed" : "Apply failed", String(e && e.message || e));
         }
       };
       if (!prompts.length) await finalize({});
@@ -1041,7 +1058,7 @@ class Plugin extends AppPlugin {
     const current = (api.getConfiguration && api.getConfiguration()) || (this.getConfiguration && this.getConfiguration()) || {};
     const custom = current.custom && typeof current.custom === 'object' ? current.custom : {};
     await api.saveConfiguration(Object.assign({}, current, {
-      version: '2.48.1',
+      version: '2.48.2',
       custom: Object.assign({}, custom, { [AUTO_TITLE_RULES_KEY]: rules })
     }));
   }
@@ -1091,7 +1108,7 @@ class Plugin extends AppPlugin {
     const current = (api.getConfiguration && api.getConfiguration()) || (this.getConfiguration && this.getConfiguration()) || {};
     const custom = current.custom && typeof current.custom === 'object' ? current.custom : {};
     await api.saveConfiguration(Object.assign({}, current, {
-      version: '2.48.1',
+      version: '2.48.2',
       custom: Object.assign({}, custom, patch || {})
     }));
   }
@@ -4224,10 +4241,9 @@ ${renderTemplaterAutoTitle.toString()}
   }
 
   async _applyInlineAnchorLine(record, anchor, singleLine) {
-    if (!record || !anchor) return { stops: [] };
-    let line = anchor.lineItem || await this._lineItemByGuid(record, anchor.afterLineGuid || anchor.lineGuid);
-    if (!line || !line.setSegments) return { stops: [] };
-    anchor.lineItem = line;
+    if (!record || !anchor) throw new Error('The remembered ;; line is no longer available.');
+    const guid = anchor.lineGuid || anchor.afterLineGuid;
+    if (!guid) throw new Error('The remembered ;; line has no GUID.');
     const stops = [];
     let inserted = [];
     if (singleLine != null) {
@@ -4235,40 +4251,68 @@ ${renderTemplaterAutoTitle.toString()}
       clean = clean.replace(/<!--PLEXUS-CURSOR:([1-9])-->/g, (_m, stop) => { stops.push(parseInt(stop, 10)); return ''; });
       inserted = this._anchorLineSegments(clean);
     }
-    const guid = anchor.lineGuid || anchor.afterLineGuid;
     try { if (this._state && guid) { this._state.clearing.add(guid); this._state.slashCooldown.set(guid, Date.now()); } } catch (e) {}
-    let source = null, range = null, next = null, verified = false;
-    // RefX _pickLink discipline: freshly typed editor text can race a plugin
-    // write, so rebuild from the live model and verify that the splice survives.
-    // A missing live state (tests/background record) cannot race the active
-    // editor and therefore accepts the SDK write directly.
-    for (let attempt = 0; attempt < 4 && !verified; attempt++) {
+    let source = null, range = null, next = null, lastFailure = null;
+    // Attempt once with the remembered SDK object. If Thymer rejects that stale
+    // editor interaction (the v2.48.1 repro) or the editor flush overwrites it,
+    // re-resolve BOTH record and line by their remembered GUIDs and retry once.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let attemptRecord = record;
+      let line = attempt === 0 ? anchor.lineItem : null;
+      if (attempt > 0) {
+        try {
+          const resolved = anchor.recordGuid && this.data && this.data.getRecord && this.data.getRecord(anchor.recordGuid);
+          attemptRecord = resolved && resolved.then ? await resolved : (resolved || record);
+        } catch (e) { attemptRecord = record; }
+      }
+      if (!line) line = await this._lineItemByGuid(attemptRecord, guid);
+      if (!line || !line.setSegments) {
+        lastFailure = 'The remembered ;; line no longer exists.';
+        continue;
+      }
+
       const liveState = this._inlineLiveStateByGuid(guid);
       let freshest = liveState ? this._inlineSegmentsFromState(liveState) : null;
       if (!freshest || !freshest.length) freshest = (line.segments || anchor.originalSegments || []).map(s => ({ type: s.type, text: s.text }));
-      if (next && this._inlineSegmentsEqual(freshest, next)) { verified = true; break; }
       const freshRange = this._inlineRangeForSegments(freshest, anchor);
       if (!freshRange) {
-        if (attempt === 0) throw new Error('The inline trigger text moved before the template could be inserted.');
-        break;
+        lastFailure = 'The line changed since ;; was typed; the trigger text is no longer there.';
+        continue;
       }
       source = freshest; range = freshRange;
       next = this._spliceInlineSegments(source, range.start, range.end, inserted);
-      await line.setSegments(next);
-      if (!liveState) { verified = true; break; }
-      await new Promise(resolve => setTimeout(resolve, 220));
-      const afterState = this._inlineLiveStateByGuid(guid);
-      const after = afterState ? this._inlineSegmentsFromState(afterState) : null;
-      verified = !!(after && this._inlineSegmentsEqual(after, next));
+      try {
+        const wrote = await line.setSegments(next);
+        if (wrote === false) throw new Error('setSegments returned false');
+      } catch (error) {
+        lastFailure = 'Thymer could not update the remembered ;; line' + (attempt ? ' after one retry' : '') + ': ' + String(error && error.message || error);
+        continue;
+      }
+
+      let verified = true;
+      if (liveState) {
+        await new Promise(resolve => setTimeout(resolve, 220));
+        const afterState = this._inlineLiveStateByGuid(guid);
+        const after = afterState ? this._inlineSegmentsFromState(afterState) : null;
+        verified = !!(after && this._inlineSegmentsEqual(after, next));
+      }
+      if (!verified) {
+        lastFailure = 'The editor overwrote the ;; insertion' + (attempt ? ' after one retry.' : '.');
+        continue;
+      }
+
+      anchor.record = attemptRecord;
+      anchor.lineItem = line;
+      const remaining = this._inlineFlatText(this._spliceInlineSegments(source, range.start, range.end, []));
+      anchor.prefixText = this._inlineFlatText(this._spliceInlineSegments(source, range.start, source.reduce((n, s) => n + this._inlineSegmentLength(s), 0), []));
+      anchor.remainingText = remaining.replace(/\u2060/g, '').trim();
+      anchor.replaceStart = range.start;
+      anchor.replaceEnd = range.start;
+      setTimeout(() => { try { if (this._state && guid) { this._state.clearing.delete(guid); this._state.slashCooldown.delete(guid); } } catch (e) {} }, SLASH_COOLDOWN_MS + 50);
+      return { stops, segments: next };
     }
-    if (!verified || !source || !range || !next) throw new Error('The inline insertion was overwritten by the editor; try the trigger again.');
-    const remaining = this._inlineFlatText(this._spliceInlineSegments(source, range.start, range.end, []));
-    anchor.prefixText = this._inlineFlatText(this._spliceInlineSegments(source, range.start, source.reduce((n, s) => n + this._inlineSegmentLength(s), 0), []));
-    anchor.remainingText = remaining.replace(/\u2060/g, '').trim();
-    anchor.replaceStart = range.start;
-    anchor.replaceEnd = range.start;
     setTimeout(() => { try { if (this._state && guid) { this._state.clearing.delete(guid); this._state.slashCooldown.delete(guid); } } catch (e) {} }, SLASH_COOLDOWN_MS + 50);
-    return { stops, segments: next };
+    throw new Error(lastFailure || 'The ;; insertion failed after one retry.');
   }
 
   async writeBody(record, body, opts) {
@@ -4566,6 +4610,10 @@ ${renderTemplaterAutoTitle.toString()}
     if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
     const popup = this._state && this._state.inlinePopup;
     if (popup) {
+      if (this._isPreviewKey(event)) {
+        event.preventDefault(); event.stopImmediatePropagation();
+        this._toggleInlineLivePreview(); return;
+      }
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
         event.preventDefault(); event.stopImmediatePropagation();
         this._moveInlineLive(event.key === 'ArrowDown' ? 1 : -1); return;
@@ -4623,6 +4671,7 @@ ${renderTemplaterAutoTitle.toString()}
       trigger, query: '', lineGuid: info.lineGuid, pageGuid: info.pageGuid,
       parentGuid: info.parentGuid, triggerStart: info.offset - trigger.length + 1,
       lineNode: info.lineNode, panelEl: info.panelEl, caretEl: info.caretEl,
+      rememberedSegments: this._spliceInlineSegments(info.segments, info.offset, info.offset, [{ type: 'text', text: event.key }]),
       cancelled: false,
     };
     this._inlinePending = pendingOpen;
@@ -4668,6 +4717,7 @@ ${renderTemplaterAutoTitle.toString()}
     if (top + height > window.innerHeight - 8 && rect.top - height - 6 >= 8) top = rect.top - height - 6;
     popup.pop.style.left = Math.round(left) + 'px';
     popup.pop.style.top = Math.round(top) + 'px';
+    if (popup.previewOpen) this._positionInlineLivePreview(popup);
   }
 
   _openInlineLive(seed) {
@@ -4675,12 +4725,12 @@ ${renderTemplaterAutoTitle.toString()}
     const pop = document.createElement('div'); pop.className = 'tmpl-inline-pop';
     const query = document.createElement('div'); query.className = 'tmpl-inline-query'; pop.appendChild(query);
     const list = document.createElement('div'); list.className = 'tmpl-inline-list'; pop.appendChild(list);
-    const hint = document.createElement('div'); hint.className = 'tmpl-inline-hint'; hint.textContent = '↑↓ choose · Enter/Tab insert · Esc keep text'; pop.appendChild(hint);
+    const hint = document.createElement('div'); hint.className = 'tmpl-inline-hint'; hint.textContent = '↑↓ choose · Enter insert · ⌃O preview · Esc'; pop.appendChild(hint);
     // Keep the fixed menu at the document paint root, outside Thymer's line
     // wrappers where inherited opacity, backdrop, or overflow can bleed through.
     document.body.appendChild(pop);
-    const popup = Object.assign({}, seed, { pop, list, queryEl: query, records: [], filtered: [], active: 0, loading: true, picking: false });
-    const outside = event => { if (this._state.inlinePopup === popup && !pop.contains(event.target)) this._closeInlineLive('outside'); };
+    const popup = Object.assign({}, seed, { pop, list, queryEl: query, records: [], filtered: [], active: 0, loading: true, picking: false, previewOpen: false, previewToken: 0, previewEl: null });
+    const outside = event => { if (this._state.inlinePopup === popup && !pop.contains(event.target) && !(popup.previewEl && popup.previewEl.contains(event.target))) this._closeInlineLive('outside'); };
     const reposition = () => {
       if (popup.raf) return;
       popup.raf = requestAnimationFrame(() => { popup.raf = 0; this._positionInlineLive(); });
@@ -4735,7 +4785,68 @@ ${renderTemplaterAutoTitle.toString()}
         popup.list.appendChild(row);
       });
     }
+    if (popup.previewOpen) this._refreshInlineLivePreview(popup);
     this._positionInlineLive();
+  }
+
+  _toggleInlineLivePreview() {
+    const popup = this._state && this._state.inlinePopup;
+    if (!popup) return false;
+    popup.previewOpen = this._nextPreviewOpen(popup.previewOpen);
+    if (!popup.previewOpen) {
+      popup.previewToken++;
+      try { if (popup.previewEl) popup.previewEl.remove(); } catch (e) {}
+      popup.previewEl = null;
+      this._positionInlineLive();
+      return false;
+    }
+    const preview = document.createElement('pre');
+    preview.className = 'tmpl-inline-preview';
+    preview.textContent = 'Rendering preview…';
+    preview.addEventListener('mousedown', event => { event.preventDefault(); event.stopImmediatePropagation(); });
+    document.body.appendChild(preview);
+    popup.previewEl = preview;
+    this._refreshInlineLivePreview(popup);
+    return true;
+  }
+
+  async _refreshInlineLivePreview(popup) {
+    if (!popup || this._state.inlinePopup !== popup || !popup.previewOpen || !popup.previewEl) return;
+    const token = ++popup.previewToken;
+    const template = popup.filtered[popup.active];
+    if (!template) { popup.previewEl.textContent = 'No matching template.'; this._positionInlineLivePreview(popup); return; }
+    popup.previewEl.textContent = 'Rendering preview…';
+    this._positionInlineLivePreview(popup);
+    try {
+      const text = await this._dryPreview(template);
+      if (this._state.inlinePopup === popup && popup.previewOpen && popup.previewEl && token === popup.previewToken) {
+        popup.previewEl.textContent = this._previewLineLimit(text || '(empty template)', 20);
+        this._positionInlineLivePreview(popup);
+      }
+    } catch (error) {
+      if (this._state.inlinePopup === popup && popup.previewOpen && popup.previewEl && token === popup.previewToken) {
+        popup.previewEl.textContent = 'Preview unavailable: ' + String(error && error.message || error);
+        this._positionInlineLivePreview(popup);
+      }
+    }
+  }
+
+  _positionInlineLivePreview(popup) {
+    if (!popup || !popup.previewEl || !popup.previewEl.isConnected || !popup.pop || !popup.pop.isConnected) return;
+    const rect = popup.pop.getBoundingClientRect();
+    const panelRect = popup.panelEl && popup.panelEl.getBoundingClientRect ? popup.panelEl.getBoundingClientRect() : null;
+    const leftBound = Math.max(8, panelRect && panelRect.width ? panelRect.left + 8 : 8);
+    const rightBound = Math.min(window.innerWidth - 8, panelRect && panelRect.width ? panelRect.right - 8 : window.innerWidth - 8);
+    const width = Math.min(360, Math.max(240, rightBound - leftBound));
+    popup.previewEl.style.width = width + 'px';
+    const height = popup.previewEl.offsetHeight || 180;
+    const fitsRight = rect.right + 8 + width <= rightBound;
+    let left = fitsRight ? rect.right + 8 : Math.min(Math.max(leftBound, rect.left), rightBound - width);
+    let top = fitsRight ? rect.top : rect.bottom + 8;
+    if (fitsRight && top + height > window.innerHeight - 8) top = Math.max(8, window.innerHeight - height - 8);
+    popup.previewEl.style.maxHeight = (fitsRight ? Math.min(420, window.innerHeight - top - 8) : Math.max(80, Math.min(420, window.innerHeight - top - 8))) + 'px';
+    popup.previewEl.style.left = Math.round(left) + 'px';
+    popup.previewEl.style.top = Math.round(top) + 'px';
   }
 
   _moveInlineLive(delta) {
@@ -4753,19 +4864,22 @@ ${renderTemplaterAutoTitle.toString()}
     try { window.removeEventListener('scroll', popup.reposition, true); } catch (e) {}
     try { window.removeEventListener('resize', popup.reposition, false); } catch (e) {}
     if (popup.raf) { try { cancelAnimationFrame(popup.raf); } catch (e) {} }
+    popup.previewToken++;
+    try { if (popup.previewEl) popup.previewEl.remove(); } catch (e) {}
     try { popup.pop.remove(); } catch (e) {}
     if (this._state.inlinePopup === popup) this._state.inlinePopup = null;
   }
 
   async _buildInlineLiveAnchor(popup) {
-    let info = null, source = null, range = null;
+    let source = null, range = null, state = null;
     for (let attempt = 0; attempt < 4; attempt++) {
-      info = this._inlineCaretInfo();
-      if (info && info.lineGuid === popup.lineGuid) {
-        source = info.segments;
-        range = this._inlineRangeForSegments(source, { trigger: popup.trigger, query: popup.query, replaceStart: popup.triggerStart });
-        if (range) break;
-      }
+      // Resolve by the GUID remembered when ;; was typed. Picker interaction
+      // must never retarget insertion to whichever line currently owns focus.
+      state = this._inlineLiveStateByGuid(popup.lineGuid);
+      source = state ? this._inlineSegmentsFromState(state) : null;
+      if ((!source || !source.length) && Array.isArray(popup.rememberedSegments)) source = popup.rememberedSegments.map(segment => ({ type: segment.type, text: segment.text }));
+      range = source && this._inlineRangeForSegments(source, { trigger: popup.trigger, query: popup.query, replaceStart: popup.triggerStart });
+      if (range) break;
       await new Promise(resolve => setTimeout(resolve, attempt ? 35 : 0));
     }
     if (!range || !source) return null;
@@ -4778,7 +4892,7 @@ ${renderTemplaterAutoTitle.toString()}
     const remainder = this._inlineFlatText(this._spliceInlineSegments(source, range.start, range.end, [])).replace(/\u2060/g, '');
     return {
       record, recordGuid: popup.pageGuid, lineGuid: popup.lineGuid, lineItem,
-      parentGuid: popup.parentGuid || info.parentGuid || popup.pageGuid, afterLineGuid: popup.lineGuid,
+      parentGuid: popup.parentGuid || state && (state.parent_guid || state.parent && state.parent.guid) || popup.pageGuid, afterLineGuid: popup.lineGuid,
       trigger: popup.trigger, query: popup.query, replaceStart: range.start, replaceEnd: range.end,
       prefixText: prefix, remainingText: remainder.trim(), originalText: this._inlineFlatText(source).replace(/\u2060/g, ''),
       originalSegments: source.map(segment => ({ type: segment.type, text: segment.text })),
@@ -4792,7 +4906,7 @@ ${renderTemplaterAutoTitle.toString()}
     const template = popup.filtered[popup.active];
     const anchor = await this._buildInlineLiveAnchor(popup);
     this._closeInlineLive('picked');
-    if (!anchor) { this.toast('Templater', 'The caret moved before the inline insert could start.'); return; }
+    if (!anchor) { this.toast('Inline insert failed', 'The line changed since ;; was typed; nothing was inserted.'); return; }
     this._state.inlineAnchor = anchor;
     await this.onTemplatePicked(template, { anchor });
   }
