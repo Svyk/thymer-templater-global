@@ -2,7 +2,7 @@
 
 A Thymer **global AppPlugin** that turns saved template records into fully-formed Thymer records — title, typed properties, and native nested body — in one keystroke. Pick a template, answer any prompts, and Templater renders the tokens and applies the result to a new or existing record. Templates can also **auto-apply** when you create a record, run on a **schedule**, and be edited through a **form dialog** with autocomplete.
 
-**v2.48.3:** makes `;;` native like RefX: `;;query` remains visible and editable in the line, the popup filters from the fresh live line, Escape/outside-click leave the text untouched, and a pick replaces only the located trigger span. Ctrl+O / Cmd+O still toggles the dry-render preview. The popup remains fully opaque and scoped to **Type=Snippet** templates by default; choose **all** in Templater settings for regular templates too.
+**v2.48.4:** renders inline snippets through the full template pipeline (including `{{time}}`, prompts, dates, and `{{cursor}}` stops) before segment splicing, and re-finds the last live `;;query`—falling back to the last bare `;;`—at commit time so prefix edits and rich prefix segments do not cause false stale-line errors. Ctrl+O / Cmd+O still toggles the dry-render preview. The popup remains fully opaque and scoped to **Type=Snippet** templates by default; choose **all** in Templater settings for regular templates too.
 
 Templates live in the **Templates** collection — one record per template. The body can be authored as the template record's own nested outline (WYSIWYG) or as a markdown block in the `Template Content` text property; the short `---` frontmatter (which sets the new record's properties) lives in `Template Content`.
 
@@ -59,6 +59,7 @@ The same `LABEL` is asked once even if reused (e.g. a Title composed of `{{promp
 | `{{date:tomorrow}}` / `{{date:next monday}}` / `{{date:+3 days}}` / `{{date:-1 week}}` | Natural language (via `DateTime.parseDateTimeString`) |
 | `{{date:+7}}` / `{{date:+7@Start Date}}` | Relative-offset / milestone (offset from another date field) |
 | `{{schedule:…}}` / `{{datetime:…}}` | Aliases of `{{date:…}}` — a real scheduling segment |
+| `{{time}}` | Current local time as 24-hour `HH:mm` plain text |
 
 ### References, tags, record & vars
 

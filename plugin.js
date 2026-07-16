@@ -1,11 +1,11 @@
-// Thymer Templater v2.48.3 — Native live-line ;; snippet insertion.
+// Thymer Templater v2.48.4 — Rendered inline tokens + robust ;; relocation.
 // Full template language: prompt / date / record.Prop / var.NAME / ref / tag /
 // include (recursion limit 3) / <%* async js %> with tp.* namespace + blocklist.
 // Frontmatter -> properties, title-setting, segment-aware nested body writer, all
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.48.3 loaded — native live-line ;; insertion.', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.48.4 loaded — rendered inline tokens + robust ;; relocation.', 'color:#10b981;font-weight:bold');
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
 const RECURSION_LIMIT = 3;
@@ -439,7 +439,7 @@ class Plugin extends AppPlugin {
       } catch (e) { return { error: String(e && e.message || e) }; }
     };
 
-    try { window.__TEMPLATER_VERSION = '2.48.3'; } catch (e) {}
+    try { window.__TEMPLATER_VERSION = '2.48.4'; } catch (e) {}
     console.log('[Templater] commands + slash + auto-apply + triggers engine registered.');
   }
 
@@ -1064,7 +1064,7 @@ class Plugin extends AppPlugin {
     const current = (api.getConfiguration && api.getConfiguration()) || (this.getConfiguration && this.getConfiguration()) || {};
     const custom = current.custom && typeof current.custom === 'object' ? current.custom : {};
     await api.saveConfiguration(Object.assign({}, current, {
-      version: '2.48.3',
+      version: '2.48.4',
       custom: Object.assign({}, custom, { [AUTO_TITLE_RULES_KEY]: rules })
     }));
   }
@@ -1114,7 +1114,7 @@ class Plugin extends AppPlugin {
     const current = (api.getConfiguration && api.getConfiguration()) || (this.getConfiguration && this.getConfiguration()) || {};
     const custom = current.custom && typeof current.custom === 'object' ? current.custom : {};
     await api.saveConfiguration(Object.assign({}, current, {
-      version: '2.48.3',
+      version: '2.48.4',
       custom: Object.assign({}, custom, patch || {})
     }));
   }
@@ -1710,6 +1710,13 @@ ${renderTemplaterAutoTitle.toString()}
       let ds = this.dateStringForSegment(fmt, ctx);
       if (dry) ds = this._dryDateString(ds);
       return M_OPEN + "DATE" + M_SEP + ds + M_CLOSE;
+    });
+
+    // {{time}} is plain local 24-hour time. Keep it in the shared renderer so
+    // record Apply and ;; inline insertion resolve the exact same token before
+    // either path tokenizes body text into Thymer segments.
+    out = out.replace(/\{\{time(?::([^}]+))?\}\}/g, (_, fmt) => {
+      return this.formatDate(new Date(), String(fmt || 'HH:mm').trim() || 'HH:mm');
     });
 
     // {{ref:Name or GUID}} -> survivable REF marker carrying the resolved guid + label.
@@ -2985,6 +2992,7 @@ ${renderTemplaterAutoTitle.toString()}
       { key: 'prompt.records:', insert: '{{prompt.records:Label :: Collection}}', caret: 'Label', hint: 'pick records (multi)' },
       { key: 'date', insert: '{{date}}', hint: 'today (date segment)' },
       { key: 'date:', insert: '{{date:YYYY-MM-DD}}', caret: 'YYYY-MM-DD', hint: 'formatted / natural / +7 / +7@Start Date' },
+      { key: 'time', insert: '{{time}}', hint: 'current local time (24-hour HH:mm)' },
       { key: 'record.', insert: '{{record.Property}}', caret: 'Property', hint: 'value from the target record' },
       { key: 'var.', insert: '{{var.Name}}', caret: 'Name', hint: 'from Variables JSON defaults' },
       { key: 'attr:', insert: '{{attr:Key}}', caret: 'Key', hint: 'live Attributes value (:avg/:avg7/:trend/:min/:max)' },
@@ -3849,7 +3857,7 @@ ${renderTemplaterAutoTitle.toString()}
       if (/\{\{\s*summary\s*\}\}/i.test(pat)) { const s = safe(await this._aiTitle(body)); pat = pat.replace(/\{\{\s*summary\s*\}\}/gi, s); }
       if (/\{\{\s*body\s*\}\}/i.test(pat)) { pat = pat.replace(/\{\{\s*body\s*\}\}/gi, safe(body.replace(/\n+/g, ' ')).slice(0, 200)); }
     }
-    const RESERVED = /^(date[:}]|prompt|var\.|ref:|tag:|ai::|include:|cursor|banner:|relate:|task:|record\.|schedule:|datetime:)/i;
+    const RESERVED = /^(date[:}]|time[:}]|prompt|var\.|ref:|tag:|ai::|include:|cursor|banner:|relate:|task:|record\.|schedule:|datetime:)/i;
     pat = pat.replace(/\{\{\s*([^}|]+?)\s*\}\}/g, (m, inner) => RESERVED.test(inner.trim()) ? m : ('{{record.' + inner.trim() + '}}'));
     let rendered = '';
     try { rendered = await this.renderTemplate(pat, { record, collection: collection || null, prompts: {}, vars: {}, empty: 'skip', templateName: 'rename' }); } catch (e) { return null; }
@@ -4206,27 +4214,30 @@ ${renderTemplaterAutoTitle.toString()}
     const chars = [...this._inlineFlatText(segments)];
     const trigger = String(anchor && anchor.trigger || this._inlineTrigger() || '');
     const query = String(anchor && anchor.query || '');
-    const wanted = [...(trigger + query)];
-    const preferred = Number.isFinite(anchor && anchor.replaceStart) ? anchor.replaceStart : null;
-    const matchesAt = (at, needle) => at >= 0 && at + needle.length <= chars.length && needle.every((ch, i) => chars[at + i] === ch);
-    if (!wanted.length) return null;
-    if (preferred == null) {
-      for (let at = chars.length - wanted.length; at >= 0; at--) if (matchesAt(at, wanted)) return { start: at, end: at + wanted.length };
-      return null;
-    }
-    // Native trigger tracking: locate the exact span nearest the remembered
-    // offset, whether text before it was inserted or deleted. Never degrade a
-    // non-empty query to a bare trigger:
-    // pick-time replacement must prove that the exact live `;;query` survives.
-    let best = null, bestDistance = Infinity;
-    for (let at = 0; at + wanted.length <= chars.length; at++) {
-      if (!matchesAt(at, wanted)) continue;
-      const distance = Math.abs(at - preferred);
-      if (distance < bestDistance || (distance === bestDistance && at >= preferred)) {
-        best = at; bestDistance = distance;
+    const findLast = needle => {
+      if (!needle.length) return -1;
+      for (let at = chars.length - needle.length; at >= 0; at--) {
+        let matches = true;
+        for (let i = 0; i < needle.length; i++) {
+          if (chars[at + i] !== needle[i]) { matches = false; break; }
+        }
+        if (matches) return at;
       }
-    }
-    return best == null ? null : { start: best, end: best + wanted.length };
+      return -1;
+    };
+    const triggerChars = [...trigger];
+    if (!triggerChars.length) return null;
+
+    // RefX commit-time rule: re-find the token from the CURRENT line, scanning
+    // backward so the most recently typed trigger wins. Numeric offsets are
+    // only historical metadata; prefix edits and one-grapheme ref/date segments
+    // must not make a valid ;; stale. Prefer the full tracked `;;query`, then
+    // fall back to the last bare `;;`. Only a line with no trigger is stale.
+    const exact = triggerChars.concat([...query]);
+    let start = findLast(exact);
+    if (start >= 0) return { start, end: start + exact.length };
+    start = findLast(triggerChars);
+    return start >= 0 ? { start, end: start + triggerChars.length } : null;
   }
 
   _spliceInlineSegments(source, start, end, inserted) {

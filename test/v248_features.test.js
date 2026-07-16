@@ -56,12 +56,30 @@ const snippetTemplate = (name = 'Clip') => ({
     { start: 2, end: 8 },
     'span search tolerates text deleted before the remembered trigger offset'
   );
-  assert.strictEqual(
+  assert.deepStrictEqual(
     plugin._inlineRangeForSegments([{ type: 'text', text: 'Before ;; other' }], { trigger: ';;', query: 'meet', replaceStart: 7 }),
-    null,
-    'a non-empty query never degrades to a bare-trigger match'
+    { start: 7, end: 9 },
+    'a missing tracked query falls back to the last bare trigger'
   );
-  console.log('PASS v2.48.3 trigger span location tolerates prefix edits without broad replacement');
+  assert.deepStrictEqual(
+    plugin._inlineRangeForSegments([{ type: 'text', text: ';;old middle ;;meet tail' }], { trigger: ';;', query: 'meet', replaceStart: 0 }),
+    { start: 13, end: 19 },
+    'the last full trigger+query wins when the line has multiple triggers'
+  );
+  assert.deepStrictEqual(
+    plugin._inlineRangeForSegments([{ type: 'text', text: ';;old middle ;; tail' }], { trigger: ';;', query: 'missing', replaceStart: 999 }),
+    { start: 13, end: 15 },
+    'the last bare trigger wins when no full tracked query remains'
+  );
+  assert.deepStrictEqual(
+    plugin._inlineRangeForSegments([
+      { type: 'ref', text: { guid: 'PREFIX' } },
+      { type: 'text', text: ' prefix ;;meet suffix' },
+    ], { trigger: ';;', query: 'meet', replaceStart: 1 }),
+    { start: 9, end: 15 },
+    'rich prefix segments count as one grapheme without shifting trigger relocation'
+  );
+  console.log('PASS v2.48.4 trigger span relocation uses the last live full/bare trigger');
 
   const livePlugin = new Plugin();
   const livePopup = {
@@ -127,6 +145,56 @@ const snippetTemplate = (name = 'Clip') => ({
   assert.deepStrictEqual(cursorStops, { stops: [3], segments: cursorLine.segments });
   console.log('PASS v2.48 single-line inline cursor stop survives the splice');
 
+  const tokenPlugin = new Plugin();
+  tokenPlugin._state = {
+    clearing: new Set(), slashCooldown: new Map(), applying: new Set(), templaterCreated: new Set(),
+  };
+  const tokenLine = {
+    guid: 'TOKEN-LINE', parent_guid: 'TOKEN-REC', segments: [{ type: 'text', text: 'Log ;;log' }],
+    setSegments: async segments => { tokenLine.segments = segments; return true; },
+  };
+  const tokenRecord = {
+    guid: 'TOKEN-REC', getName: () => 'Token target', getJournalDetails: () => null,
+    getLineItems: async () => [tokenLine], prop: () => null,
+  };
+  const navigations = [];
+  const tokenPanel = {
+    getActiveRecord: () => tokenRecord,
+    getActiveCollection: () => null,
+    navigateTo: async options => { navigations.push(options); return true; },
+  };
+  tokenPlugin.ui = { getActivePanel: () => tokenPanel };
+  tokenPlugin.data = { getRecord: () => tokenRecord };
+  tokenPlugin.assembleTemplateSource = async () => '{{time}} — {{prompt:Entry}} {{cursor}}';
+  tokenPlugin.resolveIncludes = async value => value;
+  tokenPlugin.tField = () => '';
+  tokenPlugin.tTriggers = () => [];
+  tokenPlugin.writeAuditRow = async () => {};
+  tokenPlugin.toast = () => {};
+  let settlePromptFlow;
+  const promptFlowDone = new Promise((resolve, reject) => { settlePromptFlow = { resolve, reject }; });
+  tokenPlugin.openPromptsModal = (_template, prompts, finalize) => {
+    try {
+      assert.deepStrictEqual(prompts.map(prompt => prompt.label), ['Entry'], 'inline pick collects prompts from the shared source');
+      Promise.resolve(finalize({ Entry: 'logged' })).then(settlePromptFlow.resolve, settlePromptFlow.reject);
+    } catch (error) { settlePromptFlow.reject(error); }
+  };
+  let inlineRenderCalls = 0;
+  const renderInlineTemplate = tokenPlugin.renderTemplate.bind(tokenPlugin);
+  tokenPlugin.renderTemplate = async (...args) => { inlineRenderCalls++; return renderInlineTemplate(...args); };
+  await tokenPlugin.onTemplatePicked(snippetTemplate('Log entry'), { anchor: {
+    record: tokenRecord, recordGuid: 'TOKEN-REC', lineGuid: 'TOKEN-LINE', afterLineGuid: 'TOKEN-LINE', lineItem: tokenLine,
+    parentGuid: 'TOKEN-REC', trigger: ';;', query: 'log', replaceStart: 4, replaceEnd: 9,
+    prefixText: 'Log ', originalSegments: tokenLine.segments,
+  } });
+  await promptFlowDone;
+  const tokenText = tokenLine.segments.map(segment => typeof segment.text === 'string' ? segment.text : '').join('');
+  assert.strictEqual(inlineRenderCalls, 1, 'inline pick uses the shared renderTemplate pipeline exactly once');
+  assert.match(tokenText, /^Log (?:[01]\d|2[0-3]):[0-5]\d — logged$/, '{{time}} and prompt values render before segment splicing');
+  assert.doesNotMatch(tokenText, /\{\{(?:time|prompt|cursor)/, 'no raw inline tokens reach setSegments');
+  assert.deepStrictEqual(navigations, [{ itemGuid: 'TOKEN-LINE', highlight: true }], '{{cursor}} navigates to the inline anchor line');
+  console.log('PASS v2.48.4 inline pick renders {{time}} and applies the {{cursor}} stop');
+
   const shiftedLine = {
     guid: 'SHIFTED', parent_guid: 'REC', segments: [{ type: 'text', text: 'XX A ;;clip Z' }],
     setSegments: async segments => { shiftedLine.segments = segments; return true; },
@@ -139,6 +207,23 @@ const snippetTemplate = (name = 'Clip') => ({
   }, 'picked');
   assert.strictEqual(shiftedLine.segments.map(segment => segment.text).join(''), 'XX A picked Z');
   console.log('PASS v2.48.3 pick replaces only the fresh trigger span');
+
+  const fallbackLine = {
+    guid: 'FALLBACK', parent_guid: 'REC', segments: [{ type: 'text', text: 'first ;;old and latest ;; tail' }],
+    setSegments: async segments => { fallbackLine.segments = segments; return true; },
+  };
+  const fallbackRecord = { guid: 'REC', getLineItems: async () => [fallbackLine] };
+  await plugin._applyInlineAnchorLine(fallbackRecord, {
+    record: fallbackRecord, recordGuid: 'REC', lineGuid: 'FALLBACK', lineItem: fallbackLine,
+    trigger: ';;', query: 'consumed', replaceStart: 0, replaceEnd: 10,
+    originalSegments: fallbackLine.segments,
+  }, 'picked');
+  assert.strictEqual(
+    fallbackLine.segments.map(segment => typeof segment.text === 'string' ? segment.text : '').join(''),
+    'first ;;old and latest picked tail',
+    'a current bare trigger is sufficient; stale numeric offsets and a missing query do not reject the write'
+  );
+  console.log('PASS v2.48.4 no false stale-line error when any current ;; trigger survives');
 
   const retryPlugin = new Plugin();
   retryPlugin._state = { clearing: new Set(), slashCooldown: new Map() };
