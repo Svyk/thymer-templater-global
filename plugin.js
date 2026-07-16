@@ -1,11 +1,11 @@
-// Thymer Templater v2.48.0 — Live caret popup + collection-free inline Snippets.
+// Thymer Templater v2.48.1 — Opaque inline popup + snippet-only default scope.
 // Full template language: prompt / date / record.Prop / var.NAME / ref / tag /
 // include (recursion limit 3) / <%* async js %> with tp.* namespace + blocklist.
 // Frontmatter -> properties, title-setting, segment-aware nested body writer, all
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.48.0 loaded — live ;; caret popup + inline Snippets.', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.48.1 loaded — opaque ;; popup + snippet-only default scope.', 'color:#10b981;font-weight:bold');
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
 const RECURSION_LIMIT = 3;
@@ -37,6 +37,7 @@ const AUTO_TITLE_RULES_KEY = "autoTitleRules";
 const COLLECTION_DEFAULTS_KEY = "collectionDefaults";
 const INLINE_TRIGGER_KEY = "inlineTrigger";
 const INLINE_LIVE_KEY = "inlineLive";
+const INLINE_SCOPE_KEY = "inlineScope";
 const AUTO_TITLE_PANEL_TYPE = "templater-auto-title-rules";
 const SETTINGS_PANEL_TYPE = "templater-settings";
 const AUTO_TITLE_HOOK_NAME = "Templater Auto-title";
@@ -436,7 +437,7 @@ class Plugin extends AppPlugin {
       } catch (e) { return { error: String(e && e.message || e) }; }
     };
 
-    try { window.__TEMPLATER_VERSION = '2.48.0'; } catch (e) {}
+    try { window.__TEMPLATER_VERSION = '2.48.1'; } catch (e) {}
     console.log('[Templater] commands + slash + auto-apply + triggers engine registered.');
   }
 
@@ -721,6 +722,7 @@ class Plugin extends AppPlugin {
       // Snippets are intentionally absent from record create/fill/apply flows.
       // Their only execution surface is the inline popup/anchor path.
       if (!inlineAnchor) records = records.filter(record => !this.isSnippet(record));
+      else records = this._inlineScopedTemplates(records);
     } catch (e) {
       console.error('[Templater] failed to load templates:', e);
       if (inlineAnchor) await this._restoreInlineAnchor(inlineAnchor);
@@ -1039,7 +1041,7 @@ class Plugin extends AppPlugin {
     const current = (api.getConfiguration && api.getConfiguration()) || (this.getConfiguration && this.getConfiguration()) || {};
     const custom = current.custom && typeof current.custom === 'object' ? current.custom : {};
     await api.saveConfiguration(Object.assign({}, current, {
-      version: '2.48.0',
+      version: '2.48.1',
       custom: Object.assign({}, custom, { [AUTO_TITLE_RULES_KEY]: rules })
     }));
   }
@@ -1070,6 +1072,15 @@ class Plugin extends AppPlugin {
     return !(value === false || String(value).toLowerCase() === 'off');
   }
 
+  _inlineScope() {
+    return String(this._customConfig()[INLINE_SCOPE_KEY] || 'snippets').toLowerCase() === 'all' ? 'all' : 'snippets';
+  }
+
+  _inlineScopedTemplates(records) {
+    const list = Array.isArray(records) ? records : [];
+    return this._inlineScope() === 'all' ? list.slice() : list.filter(record => this.isSnippet(record));
+  }
+
   _shouldUseInlineFallback() {
     return !this._inlineLiveEnabled() || !(this._state && this._state.inlineLiveReady === true);
   }
@@ -1080,7 +1091,7 @@ class Plugin extends AppPlugin {
     const current = (api.getConfiguration && api.getConfiguration()) || (this.getConfiguration && this.getConfiguration()) || {};
     const custom = current.custom && typeof current.custom === 'object' ? current.custom : {};
     await api.saveConfiguration(Object.assign({}, current, {
-      version: '2.48.0',
+      version: '2.48.1',
       custom: Object.assign({}, custom, patch || {})
     }));
   }
@@ -1145,13 +1156,17 @@ class Plugin extends AppPlugin {
     const liveInput = document.createElement('input'); liveInput.type = 'checkbox'; liveInput.checked = this._inlineLiveEnabled();
     const liveText = document.createElement('span'); liveText.textContent = 'Live caret popup (recommended)';
     liveRow.append(liveInput, liveText); root.appendChild(liveRow);
+    const scopeRow = document.createElement('label'); scopeRow.className = 'tmpl-check';
+    const scopeInput = document.createElement('input'); scopeInput.type = 'checkbox'; scopeInput.checked = this._inlineScope() === 'all';
+    const scopeText = document.createElement('span'); scopeText.textContent = 'Show all templates in ;; popup (default: snippets only)';
+    scopeRow.append(scopeInput, scopeText); root.appendChild(scopeRow);
     const inlineActions = document.createElement('div'); inlineActions.className = 'tmpl-auto-title-actions';
     const saveInline = document.createElement('button'); saveInline.className = 'tmpl-btn primary'; saveInline.textContent = 'Save inline trigger'; inlineActions.appendChild(saveInline); root.appendChild(inlineActions);
     saveInline.onclick = async () => {
       const value = inlineInput.value;
       if (value && (value.length < 2 || value.length > 3)) { setStatus('Trigger must be 2–3 characters, or blank to disable.', true); return; }
       saveInline.disabled = true; setStatus('Saving…', false);
-      try { await this._saveCustomConfigPatch({ [INLINE_TRIGGER_KEY]: value || false, [INLINE_LIVE_KEY]: !!liveInput.checked }); setStatus(value ? ('Inline trigger set to ' + value) : 'Inline trigger disabled.', false); }
+      try { await this._saveCustomConfigPatch({ [INLINE_TRIGGER_KEY]: value || false, [INLINE_LIVE_KEY]: !!liveInput.checked, [INLINE_SCOPE_KEY]: scopeInput.checked ? 'all' : 'snippets' }); setStatus(value ? ('Inline trigger set to ' + value) : 'Inline trigger disabled.', false); }
       catch (e) { setStatus('Could not save: ' + (e && e.message || e), true); }
       saveInline.disabled = false;
     };
@@ -4661,6 +4676,8 @@ ${renderTemplaterAutoTitle.toString()}
     const query = document.createElement('div'); query.className = 'tmpl-inline-query'; pop.appendChild(query);
     const list = document.createElement('div'); list.className = 'tmpl-inline-list'; pop.appendChild(list);
     const hint = document.createElement('div'); hint.className = 'tmpl-inline-hint'; hint.textContent = '↑↓ choose · Enter/Tab insert · Esc keep text'; pop.appendChild(hint);
+    // Keep the fixed menu at the document paint root, outside Thymer's line
+    // wrappers where inherited opacity, backdrop, or overflow can bleed through.
     document.body.appendChild(pop);
     const popup = Object.assign({}, seed, { pop, list, queryEl: query, records: [], filtered: [], active: 0, loading: true, picking: false });
     const outside = event => { if (this._state.inlinePopup === popup && !pop.contains(event.target)) this._closeInlineLive('outside'); };
@@ -4676,7 +4693,7 @@ ${renderTemplaterAutoTitle.toString()}
     this._renderInlineLive(); this._positionInlineLive();
     this.loadTemplatesSorted().then(records => {
       if (this._state.inlinePopup !== popup) return;
-      popup.records = records || []; popup.loading = false; this._renderInlineLive();
+      popup.records = this._inlineScopedTemplates(records || []); popup.loading = false; this._renderInlineLive();
     }).catch(error => {
       if (this._state.inlinePopup !== popup) return;
       popup.loading = false; popup.error = String(error && error.message || error); this._renderInlineLive();
@@ -4703,7 +4720,8 @@ ${renderTemplaterAutoTitle.toString()}
     popup.list.replaceChildren();
     if (popup.loading || popup.error || !popup.filtered.length) {
       const empty = document.createElement('div'); empty.className = 'tmpl-inline-empty';
-      empty.textContent = popup.loading ? 'Loading templates…' : (popup.error ? 'Templates unavailable' : 'No matching templates');
+      const noSnippets = !popup.loading && !popup.error && this._inlineScope() === 'snippets' && !popup.records.length;
+      empty.textContent = popup.loading ? 'Loading templates…' : (popup.error ? 'Templates unavailable' : (noSnippets ? 'No snippets yet — set Type=Snippet on a Templates record (or scope: all in settings)' : (this._inlineScope() === 'snippets' ? 'No matching snippets' : 'No matching templates')));
       popup.list.appendChild(empty);
     } else {
       popup.filtered.slice(0, 12).forEach((record, index) => {

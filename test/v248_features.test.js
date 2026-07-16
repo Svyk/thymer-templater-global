@@ -143,6 +143,10 @@ const snippetTemplate = (name = 'Clip') => ({
 
   const recent = { getName: () => 'Recent', text: () => '', prop: () => null };
   const clip = snippetTemplate('Clip');
+  plugin.getConfiguration = () => ({ custom: {} });
+  assert.deepStrictEqual(plugin._inlineScopedTemplates([recent, clip]), [clip], 'default ;; scope lists snippets only');
+  plugin.getConfiguration = () => ({ custom: { inlineScope: 'all' } });
+  assert.deepStrictEqual(plugin._inlineScopedTemplates([recent, clip]), [recent, clip], 'all ;; scope preserves v2.48.0 behavior');
   assert.deepStrictEqual(
     plugin._filterInlineCandidates([recent, clip], ''),
     [clip, recent],

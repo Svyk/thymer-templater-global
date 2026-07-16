@@ -2,7 +2,7 @@
 
 A Thymer **global AppPlugin** that turns saved template records into fully-formed Thymer records — title, typed properties, and native nested body — in one keystroke. Pick a template, answer any prompts, and Templater renders the tokens and applies the result to a new or existing record. Templates can also **auto-apply** when you create a record, run on a **schedule**, and be edited through a **form dialog** with autocomplete.
 
-**v2.48.0:** makes `;;` a live, caret-anchored picker and adds collection-free inline Snippets. v2.47's Journal-chain/carry tokens, numbered cursor stops, date/suggester prompts, defaults, and dry preview remain available.
+**v2.48.1:** makes the `;;` popup fully opaque and scopes it to **Type=Snippet** templates by default; choose **all** in Templater settings for v2.48.0 behavior. v2.47's Journal-chain/carry tokens, numbered cursor stops, date/suggester prompts, defaults, and dry preview remain available.
 
 Templates live in the **Templates** collection — one record per template. The body can be authored as the template record's own nested outline (WYSIWYG) or as a markdown block in the `Template Content` text property; the short `---` frontmatter (which sets the new record's properties) lives in `Template Content`.
 
@@ -181,7 +181,7 @@ Open **Templater: Settings…** and map a collection to a template. A local, new
 
 ## Snippets & the `;;` popup
 
-Type `;;` anywhere in an editor line. A RefX-style popup opens at Thymer's real model caret immediately; keep typing to fuzzy-filter, use Up/Down, then Enter or Tab to insert. Escape or clicking elsewhere dismisses the popup and leaves `;;query` untouched. Typing `;;;` produces a literal `;;`. If live mode is disabled or its listener cannot initialize, the prior settled-line picker remains the fallback.
+Type `;;` anywhere in an editor line. A RefX-style popup opens at Thymer's real model caret immediately; keep typing to fuzzy-filter, use Up/Down, then Enter or Tab to insert. Escape or clicking elsewhere dismisses the popup and leaves `;;query` untouched. Typing `;;;` produces a literal `;;`. If live mode is disabled or its listener cannot initialize, the prior settled-line picker remains the fallback. `custom.inlineScope` is `snippets` by default (only **Type=Snippet** records); set it to `all` in **Templater: Settings…** for the v2.48.0 list. `/tmpl` and **Apply Template…** are unchanged.
 
 Templates whose **Type** choice is **Snippet** appear first with a `✂` marker. Snippets are collection-free and body-only: they never enter record create/fill flows, ask for a target collection, apply frontmatter/properties, or run banner/relation directives. Prompt tokens still open their normal modal before insertion. Use **Templater: New snippet from selection** to capture the current text selection, or the active line when nothing is selected.
 

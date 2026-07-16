@@ -293,19 +293,23 @@
 .tmpl-auto-title-status { min-height: 18px; margin-top: 12px; color: var(--text-muted); font-size: 12px; }
 .tmpl-auto-title-status.is-error { color: var(--enum-red-fg, #dc2626); }
 
-/* v2.48 — RefX-style live inline picker. It stays below Thymer's inline
-   palettes (z=140) and uses only host theme tokens. */
+/* v2.48.1 — RefX-style live inline picker. It stays below Thymer's inline
+   palettes (z=140) and paints as an isolated, fully opaque card. */
 .tmpl-inline-pop {
   position: fixed;
   z-index: 130;
+  isolation: isolate;
+  contain: paint;
+  opacity: 1;
   box-sizing: border-box;
   width: min(360px, calc(100vw - 16px));
   max-height: min(420px, calc(100vh - 16px));
   overflow: hidden;
   padding: 6px;
-  border: 1px solid var(--border-default);
+  border: 1px solid var(--cards-border-color);
   border-radius: 8px;
-  background: var(--bg-default);
+  background: var(--cards-bg);
+  box-shadow: 0 8px 24px rgba(0,0,0,.35);
   color: inherit;
   font-family: var(--font-family);
 }
@@ -325,7 +329,7 @@
   cursor: pointer;
 }
 .tmpl-inline-row:hover,
-.tmpl-inline-row.active { background: var(--bg-hover); }
+.tmpl-inline-row.active { background: var(--sidebar-bg-hover); }
 .tmpl-inline-name { display: flex; align-items: center; gap: 7px; font-size: 13px; }
 .tmpl-inline-marker { flex: 0 0 14px; color: var(--text-muted); text-align: center; }
 .tmpl-inline-desc {
