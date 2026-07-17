@@ -1,6 +1,6 @@
 {
   "ver": 1,
-  "version": "2.48.5",
+  "version": "2.48.6",
   "name": "Templater",
   "icon": "ti-files",
   "description": "Apply templates with native properties/body segments, plus a live caret-anchored ;; popup and collection-free inline Snippets.",

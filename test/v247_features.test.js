@@ -40,17 +40,17 @@ const Plugin = new Function(source + '\n;return Plugin;')();
   const cursorGuids = await plugin.writeBody(record,
     '- second <!--PLEXUS-CURSOR:2-->\n- first <!--PLEXUS-CURSOR:1-->\n- third <!--PLEXUS-CURSOR:3-->', {});
   assert.deepStrictEqual(cursorGuids, ['LINE2', 'LINE1', 'LINE3'], 'cursor GUIDs are ordered by stop number, not source position');
-  const anchorLine = { guid: 'ANCHOR' }, positional = [];
-  const anchoredRecord = {
-    guid: 'REC', getLineItems: async () => [anchorLine],
+  const positional = [];
+  const orderedRecord = {
+    guid: 'REC',
     createLineItem: async (parent, after, type, segments) => {
       const line = { guid: 'POS' + (positional.length + 1) };
       positional.push({ parent, after, type, text: segments.map(s => s.text).join('') }); return line;
     }
   };
-  await plugin.writeBody(anchoredRecord, '- one\n- two', { anchor: { record: anchoredRecord, parentGuid: 'REC', afterLineGuid: 'ANCHOR', lineItem: anchorLine } });
-  assert.strictEqual(positional[0].after, anchorLine, 'first inline block is created immediately after the anchor');
-  assert.strictEqual(positional[1].after.guid, 'POS1', 'later inline siblings preserve author order');
+  await plugin.writeBody(orderedRecord, '- one\n- two', {});
+  assert.strictEqual(positional[0].after, null, 'first ordinary body line starts at the record root');
+  assert.strictEqual(positional[1].after.guid, 'POS1', 'later body siblings preserve author order');
   console.log('PASS multi-stop cursor ordering');
 
   plugin.runJsBlock = async () => { throw new Error('dry render executed JS'); };

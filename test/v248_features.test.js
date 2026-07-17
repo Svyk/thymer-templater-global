@@ -134,7 +134,6 @@ const snippetTemplate = (name = 'Clip') => ({
   const cursorAnchor = {
     record: cursorRecord, recordGuid: 'REC', lineGuid: 'CURSOR', lineItem: cursorLine,
     trigger: ';;', query: 'clip', replaceStart: 2, replaceEnd: 8,
-    originalSegments: cursorLine.segments,
   };
   const cursorStops = await plugin._applyInlineAnchorLine(
     cursorRecord,
@@ -186,7 +185,6 @@ const snippetTemplate = (name = 'Clip') => ({
   await tokenPlugin.onTemplatePicked(snippetTemplate('Log entry'), { anchor: {
     record: tokenRecord, recordGuid: 'TOKEN-REC', lineGuid: 'TOKEN-LINE', afterLineGuid: 'TOKEN-LINE', lineItem: tokenLine,
     parentGuid: 'TOKEN-REC', trigger: ';;', query: 'log', replaceStart: 4, replaceEnd: 9,
-    prefixText: 'Log ', originalSegments: tokenLine.segments,
   } });
   await promptFlowDone;
   const tokenText = tokenLine.segments.map(segment => typeof segment.text === 'string' ? segment.text : '').join('');
@@ -204,7 +202,6 @@ const snippetTemplate = (name = 'Clip') => ({
   await plugin._applyInlineAnchorLine(shiftedRecord, {
     record: shiftedRecord, recordGuid: 'REC', lineGuid: 'SHIFTED', lineItem: shiftedLine,
     trigger: ';;', query: 'clip', replaceStart: 2, replaceEnd: 8,
-    originalSegments: [{ type: 'text', text: 'A ;;clip Z' }],
   }, 'picked');
   assert.strictEqual(shiftedLine.segments.map(segment => segment.text).join(''), 'XX A picked Z');
   console.log('PASS v2.48.3 pick replaces only the fresh trigger span');
@@ -217,7 +214,6 @@ const snippetTemplate = (name = 'Clip') => ({
   await plugin._applyInlineAnchorLine(fallbackRecord, {
     record: fallbackRecord, recordGuid: 'REC', lineGuid: 'FALLBACK', lineItem: fallbackLine,
     trigger: ';;', query: 'consumed', replaceStart: 0, replaceEnd: 10,
-    originalSegments: fallbackLine.segments,
   }, 'picked');
   assert.strictEqual(
     fallbackLine.segments.map(segment => typeof segment.text === 'string' ? segment.text : '').join(''),
@@ -226,8 +222,8 @@ const snippetTemplate = (name = 'Clip') => ({
   );
   console.log('PASS v2.48.4 no false stale-line error when any current ;; trigger survives');
 
-  const retryPlugin = new Plugin();
-  retryPlugin._state = { clearing: new Set(), slashCooldown: new Map() };
+  const freshPlugin = new Plugin();
+  freshPlugin._state = { clearing: new Set(), slashCooldown: new Map() };
   let staleWrites = 0, freshWrites = 0;
   const staleLine = {
     guid: 'RETRY', segments: [{ type: 'text', text: 'Before ;;clip after' }],
@@ -239,28 +235,26 @@ const snippetTemplate = (name = 'Clip') => ({
   };
   const staleRecord = { guid: 'REC', getLineItems: async () => [staleLine] };
   const freshRecord = { guid: 'REC', getLineItems: async () => [freshLine] };
-  retryPlugin.data = { getRecord: guid => guid === 'REC' ? freshRecord : null };
-  retryPlugin._inlineLiveStateByGuid = () => null;
-  const retryAnchor = {
+  freshPlugin.data = { getRecord: guid => guid === 'REC' ? freshRecord : null };
+  freshPlugin._inlineLiveStateByGuid = () => null;
+  const freshAnchor = {
     record: staleRecord, recordGuid: 'REC', lineGuid: 'RETRY', afterLineGuid: 'RETRY', lineItem: staleLine,
     trigger: ';;', query: 'clip', replaceStart: 7, replaceEnd: 13,
-    originalSegments: staleLine.segments,
   };
-  await retryPlugin._applyInlineAnchorLine(staleRecord, retryAnchor, 'inserted');
+  await freshPlugin._applyInlineAnchorLine(staleRecord, freshAnchor, 'inserted');
   assert.strictEqual(staleWrites, 0, 'the remembered stale line object is never used as write authority');
   assert.strictEqual(freshWrites, 1, 'the first write uses a freshly resolved line object');
-  assert.strictEqual(retryAnchor.lineItem, freshLine, 'successful write refreshes the remembered anchor object');
+  assert.strictEqual(freshAnchor.lineItem, freshLine, 'successful write refreshes the remembered anchor object');
   assert.strictEqual(freshLine.segments.map(segment => segment.text).join(''), 'Before inserted after');
   console.log('PASS v2.48.3 stale inline anchor resolves fresh before the first write');
 
   const changedLine = { guid: 'CHANGED', segments: [{ type: 'text', text: 'user edited this line' }], setSegments: async () => true };
   const changedRecord = { guid: 'REC2', getLineItems: async () => [changedLine] };
-  retryPlugin.data = { getRecord: () => changedRecord };
+  freshPlugin.data = { getRecord: () => changedRecord };
   await assert.rejects(
-    retryPlugin._applyInlineAnchorLine(changedRecord, {
+    freshPlugin._applyInlineAnchorLine(changedRecord, {
       record: changedRecord, recordGuid: 'REC2', lineGuid: 'CHANGED', lineItem: changedLine,
       trigger: ';;', query: 'gone', replaceStart: 0, replaceEnd: 6,
-      originalSegments: changedLine.segments,
     }, 'nope'),
     /line changed since ;; was typed/i
   );
@@ -273,93 +267,85 @@ const snippetTemplate = (name = 'Clip') => ({
   assert.strictEqual(plugin._previewLineLimit(Array.from({ length: 25 }, (_, i) => String(i)).join('\n'), 20).split('\n').length, 20);
   console.log('PASS v2.48.2 preview toggle state, keybind, and 20-line cap');
 
-  let anchorResolved = 0;
-  const anchorLine = {
-    guid: 'ANCHOR', parent_guid: 'REC', segments: [{ type: 'text', text: 'Prefix ;;q' }],
-    setSegments: async segments => { anchorLine.segments = segments; freshAnchorLine.segments = segments; return true; },
-  };
-  const freshAnchorLine = { guid: 'ANCHOR', parent_guid: 'REC', segments: anchorLine.segments };
-  const writes = [];
-  const record = {
-    guid: 'REC',
-    getLineItems: async () => [anchorResolved++ === 0 ? anchorLine : freshAnchorLine],
-    createLineItem: async (parent, after, type, segments) => {
-      assert.notStrictEqual(after, anchorLine, 'createLineItem never receives the wrapper used for the guarded span replacement');
-      const line = { guid: 'NEW' + (writes.length + 1) };
-      writes.push({ parent, after, type, segments });
-      return line;
-    },
-  };
-  const anchor = {
-    record, recordGuid: 'REC', lineGuid: 'ANCHOR', afterLineGuid: 'ANCHOR', lineItem: anchorLine,
-    parentGuid: 'REC', trigger: ';;', query: 'q', replaceStart: 7, replaceEnd: 10,
-    prefixText: 'Prefix ', originalSegments: anchorLine.segments,
-  };
   assert.strictEqual(plugin._inlineBodyShape('- one\n- two').single, false);
-  await plugin._applyInlineAnchorLine(record, anchor, null);
-  assert.strictEqual(anchorLine.segments.map(segment => segment.text).join(''), 'Prefix ', 'multi-line mode keeps the prefix on its anchor line');
-  await plugin.writeBody(record, '- one\n- two', { anchor });
-  assert.strictEqual(writes[0].after, freshAnchorLine, 'multi-line body starts after a freshly resolved post-write anchor');
-  assert.strictEqual(writes[1].after.guid, 'NEW1', 'multi-line sibling order is unchanged');
-  console.log('PASS v2.48.5 multi-line body creation never reuses the pre-replacement anchor wrapper');
+  console.log('PASS v2.48.6 multi-line body shape routes to the dedicated inline transaction');
 
   const empPlugin = new Plugin();
   empPlugin._state = {
     clearing: new Set(), slashCooldown: new Map(), applying: new Set(), templaterCreated: new Set(), cursorStops: null,
   };
-  let empAnchorSegments = [{ type: 'text', text: 'Context ;;emp' }];
-  let spanWriteWrapper = null;
+  const empStored = new Map([['EMP-ANCHOR', {
+    guid: 'EMP-ANCHOR', parent_guid: 'EMP-REC', type: 'text',
+    segments: [{ type: 'text', text: 'Context ;;emp trailing' }], props: null,
+  }]]);
   const empCreated = [];
-  const makeEmpAnchor = () => {
-    const wrapper = {
-      guid: 'EMP-ANCHOR', parent_guid: 'EMP-REC', segments: empAnchorSegments.map(segment => ({ ...segment })),
-      setSegments: async segments => {
-        spanWriteWrapper = wrapper;
-        empAnchorSegments = segments.map(segment => ({ ...segment }));
-        wrapper.segments = empAnchorSegments.map(segment => ({ ...segment }));
-        return true;
-      },
-    };
-    return wrapper;
-  };
-  const empRecord = {
+  let empResolveBatch = 0;
+  const cloneSegments = segments => segments.map(segment => ({ type: segment.type, text: segment.text && typeof segment.text === 'object' ? { ...segment.text } : segment.text }));
+  const empWrapper = (stored, batch) => ({
+    guid: stored.guid, parent_guid: stored.parent_guid, type: stored.type, props: stored.props,
+    segments: cloneSegments(stored.segments), __batch: batch,
+    setSegments: async segments => { stored.segments = cloneSegments(segments); return true; },
+  });
+  const makeEmpRecord = () => ({
     guid: 'EMP-REC', getName: () => 'EMP target', getJournalDetails: () => null, prop: () => null,
-    getLineItems: async () => [makeEmpAnchor(), ...empCreated],
-    createLineItem: async (parent, after, type, segments, props) => {
-      assert.notStrictEqual(after, spanWriteWrapper, 'EMP body creation rejects the stale span-write wrapper');
-      const created = { guid: 'EMP-' + (empCreated.length + 1), parent_guid: parent && parent.guid || 'EMP-REC', type, segments, props };
-      empCreated.push(created);
-      return created;
+    getLineItems: async () => {
+      const batch = ++empResolveBatch;
+      return [...empStored.values()].map(stored => empWrapper(stored, batch));
     },
-  };
+    createLineItem: async (parent, after, type, segments, props) => {
+      assert.ok(!parent || parent.__batch === empResolveBatch, 'parent handle is from the immediately preceding fresh GUID resolution');
+      assert.ok(!after || after.__batch === empResolveBatch, 'after handle is from the immediately preceding fresh GUID resolution');
+      const stored = {
+        guid: 'EMP-' + (empCreated.length + 1), parent_guid: parent && parent.guid || 'EMP-REC',
+        type, segments: cloneSegments(segments), props,
+      };
+      empStored.set(stored.guid, stored);
+      empCreated.push(stored);
+      return empWrapper(stored, -1); // deliberately stale: the next create must not reuse this wrapper
+    },
+  });
+  const empRecord = makeEmpRecord();
   const empNavigations = [];
   empPlugin.ui = { getActivePanel: () => ({
     getActiveRecord: () => empRecord, getActiveCollection: () => null,
     navigateTo: async options => { empNavigations.push(options); return true; },
   }) };
-  empPlugin.data = { getRecord: () => empRecord };
+  empPlugin.data = { getRecord: () => makeEmpRecord() };
   empPlugin.tTriggers = () => [];
   empPlugin.tField = () => '';
   empPlugin.writeAuditRow = async () => {};
-  empPlugin.toast = () => {};
+  const empToasts = [];
+  empPlugin.toast = (...parts) => { empToasts.push(parts.join(' ')); };
   const empRendered = await empPlugin.renderTemplate([
-    '## EMP Review',
-    '- [ ] Review environmental records',
+    '## EMP Review — {{date:2026-07-16}}',
+    '- [ ] Review records for {{prompt:Owner}}',
+    '- [ ] Capture reviewed at {{time}}',
+    '### Decision',
     '- [ ] Record corrective actions {{cursor}}',
-  ].join('\n'), { prompts: {}, vars: {}, templateName: 'EMP Review' });
+  ].join('\n'), { prompts: { Owner: 'Svy' }, vars: {}, templateName: 'EMP Review' });
   await empPlugin.applyTemplate(snippetTemplate('EMP Review'), empRendered, { anchor: {
     record: empRecord, recordGuid: 'EMP-REC', lineGuid: 'EMP-ANCHOR', afterLineGuid: 'EMP-ANCHOR',
-    lineItem: makeEmpAnchor(), parentGuid: 'EMP-REC', trigger: ';;', query: 'emp',
-    replaceStart: 8, replaceEnd: 13, prefixText: 'Context ', originalSegments: empAnchorSegments,
+    lineItem: empWrapper(empStored.get('EMP-ANCHOR'), -1), parentGuid: 'EMP-REC', trigger: ';;', query: 'emp',
   } });
-  assert.deepStrictEqual(empCreated.map(line => line.type), ['heading', 'task', 'task'], 'EMP Review creates its heading and both checkboxes');
+  assert.strictEqual(empCreated.length, 5, 'the five-line EMP snippet creates all five rendered body lines');
+  assert.deepStrictEqual(empCreated.map(line => line.type), ['heading', 'task', 'task', 'heading', 'task'], 'headings and checkboxes retain their native line types');
   assert.strictEqual(empCreated[1].parent_guid, empCreated[0].guid, 'EMP checklist nests under its heading');
   assert.strictEqual(empCreated[2].parent_guid, empCreated[0].guid, 'all EMP checklist lines are created');
+  assert.strictEqual(empCreated[3].parent_guid, empCreated[0].guid, 'the nested Decision heading is preserved');
+  assert.strictEqual(empCreated[4].parent_guid, empCreated[3].guid, 'the final checkbox nests under Decision');
+  assert.strictEqual(empStored.get('EMP-ANCHOR').segments.map(segment => segment.text).join(''), 'Context ', 'the anchor is written once with the current prefix only');
+  const empVisible = empCreated.map(line => line.segments.map(segment => typeof segment.text === 'string' ? segment.text : segment.text.formatted || '').join(''));
+  assert.match(empVisible[0], /EMP Review — 2026-07-16/, 'date token is rendered before segment construction');
+  assert.match(empVisible[1], /Svy/, 'prompt token is rendered before line creation');
+  assert.match(empVisible[2], /(?:[01]\d|2[0-3]):[0-5]\d/, 'time token is rendered before line creation');
+  assert.match(empVisible[4], /Record corrective actions trailing$/, 'suffix after ;;query lands on the last created line');
+  assert.doesNotMatch(empVisible.join('\n'), /\{\{|PLEXUS-CURSOR/, 'no raw template or cursor token reaches the five created lines');
+  assert.ok(!empToasts.some(text => /failed|overwrote|line changed/i.test(text)), 'the five-line insertion reports no error');
   assert.deepStrictEqual(empNavigations, [], 'default inlineNavFlash=false emits no navigateTo call for the cursor stop');
   assert.strictEqual(empPlugin._inlineNavFlashEnabled(), false, 'inline navigation flash defaults off');
   empPlugin.getConfiguration = () => ({ custom: { inlineNavFlash: true } });
   assert.strictEqual(empPlugin._inlineNavFlashEnabled(), true, 'inline navigation flash can be explicitly enabled');
-  console.log('PASS v2.48.5 EMP Review inserts fully and inlineNavFlash gates highlighted navigation');
+  console.log('PASS v2.48.6 five-line EMP Review commits fresh handles, rendered tokens, cursor, and suffix without error');
 
   const semantics = plugin._templateSemantics(snippetTemplate(), true);
   assert.deepStrictEqual(semantics, {
@@ -394,7 +380,6 @@ const snippetTemplate = (name = 'Clip') => ({
   ].join('\n'), { anchor: {
     record: target, recordGuid: 'REC', lineGuid: 'LINE', afterLineGuid: 'LINE', lineItem: line,
     parentGuid: 'REC', trigger: ';;', query: 'clip', replaceStart: 2, replaceEnd: 8,
-    prefixText: 'A ', originalSegments: line.segments,
   } });
   const actualText = line.segments.map(segment => typeof segment.text === 'string' ? segment.text : '').join('');
   assert.match(actualText, /^A Hello\s+Z$/);

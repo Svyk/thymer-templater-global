@@ -2,7 +2,9 @@
 
 A Thymer **global AppPlugin** that turns saved template records into fully-formed Thymer records — title, typed properties, and native nested body — in one keystroke. Pick a template, answer any prompts, and Templater renders the tokens and applies the result to a new or existing record. Templates can also **auto-apply** when you create a record, run on a **schedule**, and be edited through a **form dialog** with autocomplete.
 
-**v2.48.5:** multi-line `;;` snippets now resolve the anchor from post-replacement editor state before every new body-line insert, preventing the stale-wrapper/“editor overwrote” failure. Inline inserts no longer emit a highlighted navigation by default, so the Navigation plugin does not pulse/center the inserted line; enable **Navigate to and pulse the first `{{cursor}}` after `;;` insert** in Templater settings to restore the old behavior.
+**v2.48.6:** `;;` insertion now uses one fresh-state commit path. At selection time it keeps only record/line GUID identity; after prompts and tokens render, it re-reads the current anchor segments, replaces the last live `;;query`, and performs exactly one anchor `setSegments`. Multi-line snippets then create each typed heading/task/list line with record, parent, and previous-sibling handles re-resolved by GUID before every SDK call; suffix text is included in the last create. There is no remembered-snapshot comparison or post-write verification/retry. The only stale-editor error is that the current anchor line no longer contains `;;`.
+
+Inline inserts do not emit highlighted navigation by default, so the Navigation plugin does not pulse/center the inserted line; enable **Navigate to and pulse the first `{{cursor}}` after `;;` insert** in Templater settings to restore the old behavior.
 
 Templates live in the **Templates** collection — one record per template. The body can be authored as the template record's own nested outline (WYSIWYG) or as a markdown block in the `Template Content` text property; the short `---` frontmatter (which sets the new record's properties) lives in `Template Content`.
 

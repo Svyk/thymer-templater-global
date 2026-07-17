@@ -1,11 +1,11 @@
-// Thymer Templater v2.48.5 — Reliable multi-line snippets + optional inline navigation flash.
+// Thymer Templater v2.48.6 — Fresh-state atomic inline snippet commits.
 // Full template language: prompt / date / record.Prop / var.NAME / ref / tag /
 // include (recursion limit 3) / <%* async js %> with tp.* namespace + blocklist.
 // Frontmatter -> properties, title-setting, segment-aware nested body writer, all
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.48.5 loaded — reliable multi-line snippets + optional inline navigation flash.', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.48.6 loaded — fresh-state atomic inline snippet commits.', 'color:#10b981;font-weight:bold');
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
 const RECURSION_LIMIT = 3;
@@ -440,7 +440,7 @@ class Plugin extends AppPlugin {
       } catch (e) { return { error: String(e && e.message || e) }; }
     };
 
-    try { window.__TEMPLATER_VERSION = '2.48.5'; } catch (e) {}
+    try { window.__TEMPLATER_VERSION = '2.48.6'; } catch (e) {}
     console.log('[Templater] commands + slash + auto-apply + triggers engine registered.');
   }
 
@@ -707,25 +707,10 @@ class Plugin extends AppPlugin {
   }
 
   async _restoreInlineAnchor(anchor, original) {
-    if (!anchor) return;
-    // The native live popup never removes `;;query`, so cancel/error paths have
-    // nothing to restore. Avoid an unnecessary setSegments write that could
-    // overwrite edits made after the popup opened.
-    if (anchor.nativeInline) return;
-    const guid = anchor.lineGuid;
-    try { if (this._state && guid) { this._state.clearing.add(guid); this._state.slashCooldown.set(guid, Date.now()); } } catch (e) {}
-    try {
-      let line = anchor.lineItem;
-      if (!line && anchor.record) line = await this._lineItemByGuid(anchor.record, anchor.lineGuid);
-      if (line && line.setSegments) {
-        if (original == null && Array.isArray(anchor.originalSegments) && anchor.originalSegments.length) {
-          await line.setSegments(anchor.originalSegments.map(segment => ({ type: segment.type, text: segment.text })));
-        } else {
-          await line.setSegments([{ type: 'text', text: String(original == null ? anchor.originalText : original) }]);
-        }
-      }
-    } catch (e) { console.warn('[Templater] inline anchor restore failed:', e); }
-    setTimeout(() => { try { if (this._state && guid) { this._state.clearing.delete(guid); this._state.slashCooldown.delete(guid); } } catch (e) {} }, SLASH_COOLDOWN_MS + 50);
+    // Neither live nor settled-line pickers remove `;;query` before a choice is
+    // committed. Cancel/error therefore has nothing to restore. Never replay a
+    // remembered segment snapshot over the user's current line.
+    void anchor; void original;
   }
 
   async openPicker(presetTemplateName, pickerOpts) {
@@ -1065,7 +1050,7 @@ class Plugin extends AppPlugin {
     const current = (api.getConfiguration && api.getConfiguration()) || (this.getConfiguration && this.getConfiguration()) || {};
     const custom = current.custom && typeof current.custom === 'object' ? current.custom : {};
     await api.saveConfiguration(Object.assign({}, current, {
-      version: '2.48.5',
+      version: '2.48.6',
       custom: Object.assign({}, custom, { [AUTO_TITLE_RULES_KEY]: rules })
     }));
   }
@@ -1132,7 +1117,7 @@ class Plugin extends AppPlugin {
     const current = (api.getConfiguration && api.getConfiguration()) || (this.getConfiguration && this.getConfiguration()) || {};
     const custom = current.custom && typeof current.custom === 'object' ? current.custom : {};
     await api.saveConfiguration(Object.assign({}, current, {
-      version: '2.48.5',
+      version: '2.48.6',
       custom: Object.assign({}, custom, patch || {})
     }));
   }
@@ -3458,7 +3443,7 @@ ${renderTemplaterAutoTitle.toString()}
     let targetIsJournal = false;
 
     if (inlineMode) {
-      targetRecord = opts.anchor.record || (opts.anchor.recordGuid && await this.pollRecord(opts.anchor.recordGuid));
+      targetRecord = (opts.anchor.recordGuid && await this.pollRecord(opts.anchor.recordGuid)) || opts.anchor.record;
       if (!targetRecord) { this.toast('Templater', 'Inline anchor record is no longer available.'); return; }
       targetCollection = null;
       targetIsJournal = this._recordApplyContext(targetRecord).isJournal;
@@ -3560,36 +3545,17 @@ ${renderTemplaterAutoTitle.toString()}
     bodyForWrite = bodyForWrite.replace(/<!--PLEXUS-PROMOTE-->/gi, '');
     let cursorGuids = [];
     const cursorSeed = [];
-    const inlineShape = inlineMode ? this._inlineBodyShape(bodyForWrite) : null;
     if (inlineMode) {
-      // A one-line template is true inline text: replace only trigger+query and
-      // retain every segment on both sides. Multi-line keeps v2.47 anchor mode.
-      const applied = await this._applyInlineAnchorLine(targetRecord, opts.anchor, inlineShape && inlineShape.single ? inlineShape.line : null);
-      for (const stop of (applied && applied.stops || [])) cursorSeed.push({ stop, guid: opts.anchor.afterLineGuid, order: cursorSeed.length });
-      if (inlineShape && inlineShape.single) bodyForWrite = '';
-    }
-    // When the trigger occupied an otherwise-empty anchor line, reuse that line for the first
-    // rendered block and insert the remaining top-level blocks after it.
-    if (inlineMode && !(opts.anchor.remainingText || opts.anchor.prefixText || '').trim() && bodyForWrite.trim()) {
-      const rawLines = bodyForWrite.split('\n');
-      const firstIndex = rawLines.findIndex(line => line.trim());
-      if (firstIndex >= 0) {
-        let first = rawLines[firstIndex].trim(); const stops = [];
-        first = first.replace(/<!--PLEXUS-CURSOR:([1-9])-->/g, (_, stop) => { stops.push(parseInt(stop, 10)); return ''; }).trim();
-        // The trigger-removal write can invalidate its line wrapper. Resolve
-        // again before the optional empty-anchor reuse write as well.
-        let anchorLine = await this._lineItemByGuid(targetRecord, opts.anchor.afterLineGuid || opts.anchor.lineGuid);
-        if (anchorLine && anchorLine.setSegments) {
-          try { await anchorLine.setSegments(this._anchorLineSegments(first)); opts.anchor.lineItem = anchorLine; } catch (e) { console.warn('[Templater] inline first-line reuse failed:', e); }
-          for (let i = 0; i < stops.length; i++) cursorSeed.push({ stop: stops[i], guid: opts.anchor.afterLineGuid, order: i });
-          rawLines.splice(firstIndex, 1); bodyForWrite = rawLines.join('\n');
-        }
-      }
-    }
-    if (bodyForWrite.trim()) {
+      // Inline insertion is one dedicated commit. It re-resolves the record and
+      // anchor by GUID, derives prefix/suffix from the CURRENT segments, writes
+      // the anchor once, then creates every body line using freshly re-resolved
+      // GUID handles. It never enters the general append writer.
+      cursorGuids = await this._commitInlineTemplate(targetRecord, opts.anchor, bodyForWrite, { flat: vars && vars.nest === 'flat' });
+      bodyForWrite = '';
+    } else if (bodyForWrite.trim()) {
       // createLineItem(null, null, ...) prepends the first root line, so a Journal fill lands at
       // the page top; writeBody then chains siblings in author order beneath that first line.
-      cursorGuids = await this.writeBody(targetRecord, bodyForWrite, { flat: vars && vars.nest === 'flat', anchor: inlineMode ? opts.anchor : null, cursorSeed });
+      cursorGuids = await this.writeBody(targetRecord, bodyForWrite, { flat: vars && vars.nest === 'flat', cursorSeed });
     } else if (cursorSeed.length) cursorGuids = cursorSeed.sort((a, b) => a.stop - b.stop || a.order - b.order).map(x => x.guid);
     if (wantPromote) this._promoteAfterApply(targetRecord);
 
@@ -4203,39 +4169,17 @@ ${renderTemplaterAutoTitle.toString()}
     if (!record || !guid) return null;
     try {
       const lines = await record.getLineItems(false);
-      return (lines || []).find(line => line && line.guid === guid) || null;
+      const find = items => {
+        for (const line of (items || [])) {
+          if (!line) continue;
+          if (line.guid === guid) return line;
+          const nested = line.children && line.children.length ? find(line.children) : null;
+          if (nested) return nested;
+        }
+        return null;
+      };
+      return find(lines);
     } catch (e) { return null; }
-  }
-
-  async _freshInlineCreateContext(record, anchor, parentItem, afterItem) {
-    // setSegments invalidates the editor wrapper that authorized that write on
-    // some Thymer builds. Body lines are NEW siblings/children, so resolve the
-    // record and all existing GUID-backed placement handles from post-write
-    // state before every createLineItem. Never carry the pre-replace anchor
-    // snapshot into the create path.
-    let freshRecord = record;
-    const recordGuid = anchor && (anchor.recordGuid || (record && (record.guid || (record.getGuid && record.getGuid()))));
-    try {
-      let resolved = recordGuid && this.data && this.data.getRecord && this.data.getRecord(recordGuid);
-      if (resolved && resolved.then) resolved = await resolved;
-      if (resolved) freshRecord = resolved;
-    } catch (e) {}
-
-    let items = [];
-    try { items = freshRecord && freshRecord.getLineItems ? await freshRecord.getLineItems(false) : []; } catch (e) { items = []; }
-    const byGuid = new Map((items || []).filter(item => item && item.guid).map(item => [item.guid, item]));
-    const anchorGuid = anchor && (anchor.afterLineGuid || anchor.lineGuid);
-    const freshAnchor = anchorGuid ? byGuid.get(anchorGuid) : null;
-    if (!freshAnchor) throw new Error('The remembered ;; line moved before the inline body could be inserted.');
-
-    const refresh = item => item && item.guid && byGuid.get(item.guid) || item || null;
-    const freshParent = refresh(parentItem);
-    let freshAfter = refresh(afterItem);
-    if (afterItem && afterItem.guid === anchorGuid) freshAfter = freshAnchor;
-
-    anchor.record = freshRecord;
-    anchor.lineItem = freshAnchor;
-    return { record: freshRecord, parentItem: freshParent, afterItem: freshAfter };
   }
 
   _anchorLineSegments(raw) {
@@ -4258,19 +4202,40 @@ ${renderTemplaterAutoTitle.toString()}
     return (segments || []).map(segment => segment && segment.type === 'text' && typeof segment.text === 'string' ? segment.text : '\u2060').join('');
   }
 
-  _inlineSegmentsEqual(left, right) {
-    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
-    for (let i = 0; i < left.length; i++) {
-      if (!left[i] || !right[i] || left[i].type !== right[i].type) return false;
-      if (left[i].type === 'text' && left[i].text !== right[i].text) return false;
-      if (left[i].type !== 'text') {
-        const a = left[i].text, b = right[i].text;
-        const aKey = a && typeof a === 'object' ? String(a.guid || a.formatted || a.d || '') : String(a == null ? '' : a);
-        const bKey = b && typeof b === 'object' ? String(b.guid || b.formatted || b.d || '') : String(b == null ? '' : b);
-        if (aKey !== bKey) return false;
+  _cloneInlineSegments(segments) {
+    return (segments || []).filter(Boolean).map(segment => ({
+      type: segment.type,
+      text: segment.text && typeof segment.text === 'object' ? { ...segment.text } : segment.text,
+    }));
+  }
+
+  _inlineSegmentSlice(segments, start, end) {
+    const out = [];
+    let offset = 0;
+    for (const segment of (segments || [])) {
+      const len = this._inlineSegmentLength(segment), segStart = offset, segEnd = offset + len;
+      offset = segEnd;
+      if (segEnd <= start || segStart >= end) continue;
+      if (segment.type === 'text' && typeof segment.text === 'string') {
+        const chars = [...segment.text];
+        const from = Math.max(0, start - segStart);
+        const to = Math.min(chars.length, end - segStart);
+        if (to > from) out.push({ type: 'text', text: chars.slice(from, to).join('') });
+      } else if (start <= segStart && end >= segEnd) {
+        out.push(this._cloneInlineSegments([segment])[0]);
       }
     }
-    return true;
+    return out;
+  }
+
+  _inlineConcatSegments(...groups) {
+    const out = [];
+    for (const segment of this._cloneInlineSegments(groups.flat())) {
+      const previous = out[out.length - 1];
+      if (previous && previous.type === 'text' && segment.type === 'text' && typeof previous.text === 'string' && typeof segment.text === 'string') previous.text += segment.text;
+      else out.push(segment);
+    }
+    return out.length ? out : [{ type: 'text', text: '' }];
   }
 
   _inlineRangeForSegments(segments, anchor) {
@@ -4330,81 +4295,153 @@ ${renderTemplaterAutoTitle.toString()}
     return merged.length ? merged : [{ type: 'text', text: '' }];
   }
 
-  async _applyInlineAnchorLine(record, anchor, singleLine) {
-    if (!record || !anchor) throw new Error('The remembered ;; line is no longer available.');
-    const guid = anchor.lineGuid || anchor.afterLineGuid;
-    if (!guid) throw new Error('The remembered ;; line has no GUID.');
+  async _freshInlineRecordAndLines(record, recordGuid) {
+    let freshRecord = record;
+    try {
+      let resolved = recordGuid && this.data && this.data.getRecord && this.data.getRecord(recordGuid);
+      if (resolved && resolved.then) resolved = await resolved;
+      if (resolved) freshRecord = resolved;
+    } catch (e) {}
+    let items = [];
+    try { items = freshRecord && freshRecord.getLineItems ? await freshRecord.getLineItems(false) : []; } catch (e) {}
+    const byGuid = new Map();
+    const index = list => {
+      for (const item of (list || [])) {
+        if (!item) continue;
+        if (item.guid) byGuid.set(item.guid, item);
+        if (item.children && item.children.length) index(item.children);
+      }
+    };
+    index(items);
+    return { record: freshRecord, byGuid };
+  }
+
+  _inlineBodyLineSpec(raw) {
+    if (!String(raw || '').trim()) return null;
+    const indent = (String(raw).match(/^([\t ]*)/) || ['', ''])[1].replace(/\t/g, '  ').length;
+    const level = Math.floor(indent / 2);
     const stops = [];
-    let inserted = [];
-    if (singleLine != null) {
-      let clean = String(singleLine);
-      clean = clean.replace(/<!--PLEXUS-CURSOR:([1-9])-->/g, (_m, stop) => { stops.push(parseInt(stop, 10)); return ''; });
-      inserted = this._anchorLineSegments(clean);
+    let line = String(raw).trim().replace(/<!--PLEXUS-CURSOR:([1-9])-->/g, (_match, stop) => { stops.push(parseInt(stop, 10)); return ''; }).trim();
+    let type = 'text', content = line, props = null;
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) { type = 'heading'; content = heading[2]; props = { heading_size: Math.min(heading[1].length, 6) }; }
+    else if (/^>\s+/.test(line)) { type = 'quote'; content = line.replace(/^>\s+/, ''); }
+    else if (/^(-{3,}|\*{3,}|_{3,})$/.test(line)) { content = '———'; }
+    else if (/^[-*+]\s*\[[ xX]\]/.test(line)) { type = 'task'; content = line.replace(/^[-*+]\s*\[[ xX]\]\s*/, ''); }
+    else if (/^[-*+](?:\s+.*)?$/.test(line)) { type = 'ulist'; content = line.replace(/^[-*+]\s*/, ''); }
+    else if (/^\d+\.(?:\s+.*)?$/.test(line)) { type = 'olist'; content = line.replace(/^\d+\.\s*/, ''); }
+    return { level, type, content, props, stops, nestable: type === 'ulist' || type === 'olist' || type === 'task' };
+  }
+
+  async _commitInlineTemplate(record, anchor, body, options) {
+    if (!record || !anchor) throw new Error('The remembered ;; line is no longer available.');
+    const recordGuid = anchor.recordGuid || record.guid || (record.getGuid && record.getGuid());
+    const anchorGuid = anchor.lineGuid || anchor.afterLineGuid;
+    if (!recordGuid || !anchorGuid) throw new Error('The inline insertion target has no GUID.');
+    let context = await this._freshInlineRecordAndLines(record, recordGuid);
+    let anchorLine = context.byGuid.get(anchorGuid);
+    if (!anchorLine || typeof anchorLine.setSegments !== 'function') throw new Error('The inline insertion line no longer exists.');
+
+    // RefX's durable rule: commit from the current model, never from the picker
+    // snapshot. The last live trigger wins; the remembered offsets are ignored.
+    const liveState = this._inlineLiveStateByGuid(anchorGuid);
+    let source = liveState ? this._inlineSegmentsFromState(liveState) : null;
+    if (!source || !source.length) source = this._cloneInlineSegments(anchorLine.segments || []);
+    const range = this._inlineRangeForSegments(source, anchor);
+    if (!range) throw new Error('The line changed since ;; was typed; the trigger text is no longer there.');
+    const total = source.reduce((sum, segment) => sum + this._inlineSegmentLength(segment), 0);
+    const prefix = this._inlineSegmentSlice(source, 0, range.start);
+    const suffix = this._inlineSegmentSlice(source, range.end, total);
+    const specs = String(body || '').split('\n').map(line => this._inlineBodyLineSpec(line)).filter(Boolean);
+    const cursorStops = [];
+    let cursorOrder = 0;
+    const flat = !!(options && options.flat);
+    try { if (this._state) { this._state.clearing.add(anchorGuid); this._state.slashCooldown.set(anchorGuid, Date.now()); } } catch (e) {}
+
+    try {
+      if (specs.length <= 1) {
+        const spec = specs[0] || null;
+        const inserted = spec ? this.parseInlineSegments(spec.content) : [];
+        const next = this._inlineConcatSegments(prefix, inserted, suffix);
+        const wrote = await anchorLine.setSegments(next);
+        if (wrote === false) throw new Error('Thymer rejected the inline line update.');
+        if (spec) for (const stop of spec.stops) cursorStops.push({ stop, guid: anchorGuid, order: cursorOrder++ });
+        anchor.record = context.record;
+        anchor.lineItem = anchorLine;
+        return cursorStops.sort((a, b) => a.stop - b.stop || a.order - b.order).map(entry => entry.guid);
+      }
+
+      // Multi-line: preserve the anchor's prefix only so every template line can
+      // retain its real heading/task/list type. The suffix is included in the
+      // LAST createLineItem call, so there is no post-create mutation.
+      const anchorWrite = await anchorLine.setSegments(this._inlineConcatSegments(prefix));
+      if (anchorWrite === false) throw new Error('Thymer rejected the inline anchor update.');
+      const baseParentGuid = anchorLine.parent_guid && anchorLine.parent_guid !== recordGuid ? anchorLine.parent_guid : null;
+      const stack = [], headingStack = [];
+      const lastChildOf = new Map([[baseParentGuid || '', anchorGuid]]);
+
+      for (let index = 0; index < specs.length; index++) {
+        const spec = specs[index];
+        let parentGuid = baseParentGuid;
+        if (flat) {
+          if (spec.nestable) {
+            while (stack.length && stack[stack.length - 1].level >= spec.level) stack.pop();
+            parentGuid = stack.length ? stack[stack.length - 1].guid : baseParentGuid;
+          } else stack.length = 0;
+        } else if (spec.type === 'heading') {
+          const size = spec.props.heading_size;
+          while (headingStack.length && headingStack[headingStack.length - 1].size >= size) headingStack.pop();
+          parentGuid = headingStack.length ? headingStack[headingStack.length - 1].guid : baseParentGuid;
+          stack.length = 0;
+        } else {
+          const scopeGuid = headingStack.length ? headingStack[headingStack.length - 1].guid : baseParentGuid;
+          if (spec.nestable) {
+            while (stack.length && stack[stack.length - 1].level >= spec.level) stack.pop();
+            parentGuid = stack.length ? stack[stack.length - 1].guid : scopeGuid;
+          } else { stack.length = 0; parentGuid = scopeGuid; }
+        }
+
+        const parentKey = parentGuid || '';
+        const afterGuid = lastChildOf.get(parentKey) || null;
+        // Every SDK call gets a newly resolved record, parent, and after handle.
+        // In particular, a just-created sibling is looked up again by its GUID;
+        // its returned wrapper is never carried into the next call.
+        context = await this._freshInlineRecordAndLines(context.record, recordGuid);
+        const parentItem = parentGuid ? context.byGuid.get(parentGuid) : null;
+        const afterItem = afterGuid ? context.byGuid.get(afterGuid) : null;
+        if (parentGuid && !parentItem) throw new Error('The inline parent line could not be re-resolved.');
+        if (afterGuid && !afterItem) throw new Error('The previous inline line could not be re-resolved.');
+        let segments = this.parseInlineSegments(spec.content);
+        if (index === specs.length - 1) segments = this._inlineConcatSegments(segments, suffix);
+        const created = await context.record.createLineItem(parentItem, afterItem, spec.type, segments, spec.props);
+        if (!created || !created.guid) throw new Error('Thymer could not create an inline body line.');
+        const createdGuid = created.guid;
+        lastChildOf.set(parentKey, createdGuid);
+        if (spec.type === 'heading' && !flat) headingStack.push({ size: spec.props.heading_size, guid: createdGuid });
+        else if (spec.nestable) stack.push({ level: spec.level, guid: createdGuid });
+        for (const stop of spec.stops) cursorStops.push({ stop, guid: createdGuid, order: cursorOrder++ });
+      }
+      anchor.record = context.record;
+      anchor.lineItem = null;
+      return cursorStops.sort((a, b) => a.stop - b.stop || a.order - b.order).map(entry => entry.guid);
+    } finally {
+      setTimeout(() => { try { if (this._state) { this._state.clearing.delete(anchorGuid); this._state.slashCooldown.delete(anchorGuid); } } catch (e) {} }, SLASH_COOLDOWN_MS + 50);
     }
-    try { if (this._state && guid) { this._state.clearing.add(guid); this._state.slashCooldown.set(guid, Date.now()); } } catch (e) {}
-    let source = null, range = null, next = null, lastFailure = null;
-    // Resolve BOTH record and line by GUID before every write. The remembered
-    // SDK wrapper and originalSegments are metadata only; neither is fresh
-    // enough to authorize replacing editor text.
-    for (let attempt = 0; attempt < 2; attempt++) {
-      let attemptRecord = record;
-      try {
-        const resolved = anchor.recordGuid && this.data && this.data.getRecord && this.data.getRecord(anchor.recordGuid);
-        attemptRecord = resolved && resolved.then ? await resolved : (resolved || record);
-      } catch (e) { attemptRecord = record; }
-      const line = await this._lineItemByGuid(attemptRecord, guid);
-      if (!line || !line.setSegments) {
-        lastFailure = 'The remembered ;; line no longer exists.';
-        continue;
-      }
+  }
 
-      const liveState = this._inlineLiveStateByGuid(guid);
-      let freshest = liveState ? this._inlineSegmentsFromState(liveState) : null;
-      if (!freshest || !freshest.length) freshest = (line.segments || []).map(s => ({ type: s.type, text: s.text }));
-      const freshRange = this._inlineRangeForSegments(freshest, anchor);
-      if (!freshRange) {
-        lastFailure = 'The line changed since ;; was typed; the trigger text is no longer there.';
-        continue;
-      }
-      source = freshest; range = freshRange;
-      next = this._spliceInlineSegments(source, range.start, range.end, inserted);
-      try {
-        const wrote = await line.setSegments(next);
-        if (wrote === false) throw new Error('setSegments returned false');
-      } catch (error) {
-        lastFailure = 'Thymer could not update the remembered ;; line' + (attempt ? ' after one retry' : '') + ': ' + String(error && error.message || error);
-        continue;
-      }
-
-      let verified = true;
-      if (liveState) {
-        await new Promise(resolve => setTimeout(resolve, 220));
-        const afterState = this._inlineLiveStateByGuid(guid);
-        const after = afterState ? this._inlineSegmentsFromState(afterState) : null;
-        verified = !!(after && this._inlineSegmentsEqual(after, next));
-      }
-      if (!verified) {
-        lastFailure = 'The editor overwrote the ;; insertion' + (attempt ? ' after one retry.' : '.');
-        continue;
-      }
-
-      anchor.record = attemptRecord;
-      anchor.lineItem = line;
-      const remaining = this._inlineFlatText(this._spliceInlineSegments(source, range.start, range.end, []));
-      anchor.prefixText = this._inlineFlatText(this._spliceInlineSegments(source, range.start, source.reduce((n, s) => n + this._inlineSegmentLength(s), 0), []));
-      anchor.remainingText = remaining.replace(/\u2060/g, '').trim();
-      anchor.replaceStart = range.start;
-      anchor.replaceEnd = range.start;
-      setTimeout(() => { try { if (this._state && guid) { this._state.clearing.delete(guid); this._state.slashCooldown.delete(guid); } } catch (e) {} }, SLASH_COOLDOWN_MS + 50);
-      return { stops, segments: next };
-    }
-    setTimeout(() => { try { if (this._state && guid) { this._state.clearing.delete(guid); this._state.slashCooldown.delete(guid); } } catch (e) {} }, SLASH_COOLDOWN_MS + 50);
-    throw new Error(lastFailure || 'The ;; insertion failed after one retry.');
+  async _applyInlineAnchorLine(record, anchor, singleLine) {
+    const stops = [];
+    const body = singleLine == null ? '' : String(singleLine).replace(/<!--PLEXUS-CURSOR:([1-9])-->/g, (_match, stop) => { stops.push(parseInt(stop, 10)); return ''; });
+    await this._commitInlineTemplate(record, anchor, body, {});
+    const recordGuid = anchor.recordGuid || record.guid;
+    const guid = anchor.lineGuid || anchor.afterLineGuid;
+    const context = await this._freshInlineRecordAndLines(anchor.record || record, recordGuid);
+    const line = context.byGuid.get(guid);
+    return { stops, segments: this._cloneInlineSegments(line && line.segments || []) };
   }
 
   async writeBody(record, body, opts) {
     const flat = !!(opts && opts.flat);
-    const anchor = opts && opts.anchor;
     const lines = body.split('\n');
     // Track parents per indent LEVEL so nested bullets nest correctly. Indent is normalized
     // to a level (2 spaces or 1 tab = one level) before the stack comparison, so 2-space and
@@ -4416,19 +4453,7 @@ ${renderTemplaterAutoTitle.toString()}
     const headingStack = []; // [{size, item}] — heading outline scopes; a heading PARENTS the lines beneath it
     const ROOT = {};
     const lastChildOf = new Map();
-    let baseParent = null, anchorAfter = null;
-    if (anchor) {
-      const recordGuid = record && (record.guid || (record.getGuid && record.getGuid()));
-      const parentSeed = anchor.parentGuid && anchor.parentGuid !== recordGuid ? { guid: anchor.parentGuid } : null;
-      const anchorSeed = { guid: anchor.afterLineGuid || anchor.lineGuid };
-      // Do not prefer anchor.lineItem here: it is the wrapper used by the
-      // preceding span replacement and can already be invalid. Resolve record,
-      // parent, and anchor together from post-write state, then do the same
-      // immediately before every body create.
-      const context = await this._freshInlineCreateContext(record, anchor, parentSeed, anchorSeed);
-      record = context.record; baseParent = context.parentItem; anchorAfter = context.afterItem;
-      lastChildOf.set(ROOT, anchorAfter);
-    }
+    const baseParent = null;
     const cursorStops = (opts && Array.isArray(opts.cursorSeed) ? opts.cursorSeed.slice() : []); let cursorOrder = cursorStops.length;
     for (const raw of lines) {
       if (!raw.trim()) continue;
@@ -4505,17 +4530,9 @@ ${renderTemplaterAutoTitle.toString()}
       try {
         // parentItem + afterItem are PluginLineItem OBJECTS (or null). afterItem = the previous
         // sibling under this parent, so lines append in author order instead of reversing.
-        let createRecord = record, createParent = parentItem, createAfter = afterItem;
-        if (anchor) {
-          const context = await this._freshInlineCreateContext(record, anchor, parentItem, afterItem);
-          createRecord = context.record; createParent = context.parentItem; createAfter = context.afterItem;
-          record = createRecord;
-          if (baseParent && createParent && baseParent.guid === createParent.guid) baseParent = createParent;
-        }
-        created = await createRecord.createLineItem(createParent, createAfter, type, segments, props);
+        created = await record.createLineItem(parentItem, afterItem, type, segments, props);
       } catch (e) {
         console.warn('[Templater] createLineItem failed for', type, line, e);
-        if (anchor) throw e;
       }
       if (created) {
         lastChildOf.set(parentKey, created);
@@ -5042,33 +5059,22 @@ ${renderTemplaterAutoTitle.toString()}
     let record = this.data.getRecord && this.data.getRecord(popup.pageGuid);
     if (record && record.then) record = await record;
     if (!record) return null;
-    let lineItem = await this._lineItemByGuid(record, popup.lineGuid);
+    const lineItem = await this._lineItemByGuid(record, popup.lineGuid);
     if (!lineItem) return null;
-    let source = null, range = null, state = null, liveQuery = popup.query || '';
-    for (let attempt = 0; attempt < 4; attempt++) {
-      // Resolve by the GUID remembered when ;; was typed. Picker interaction
-      // must never retarget insertion to whichever line currently owns focus.
-      const snapshot = this._inlineLiveSnapshot(popup);
-      state = snapshot && snapshot.state || this._inlineLiveStateByGuid(popup.lineGuid);
-      source = snapshot ? snapshot.segments : (state ? this._inlineSegmentsFromState(state) : null);
-      if ((!source || !source.length) && lineItem.segments) source = lineItem.segments.map(segment => ({ type: segment.type, text: segment.text }));
-      liveQuery = snapshot ? snapshot.query : popup.query || '';
-      range = snapshot
-        ? { start: snapshot.start, end: snapshot.end }
-        : (source && this._inlineRangeForSegments(source, { trigger: popup.trigger, query: liveQuery, replaceStart: popup.triggerStart }));
-      if (range) break;
-      await new Promise(resolve => setTimeout(resolve, attempt ? 35 : 0));
-      lineItem = await this._lineItemByGuid(record, popup.lineGuid) || lineItem;
-    }
+    // Pick-time identity is GUID-only. Read the current line once to capture the
+    // live query, but do not carry its segments forward as write authority; the
+    // final commit re-resolves and re-reads after prompts/tokens have rendered.
+    const snapshot = this._inlineLiveSnapshot(popup);
+    const state = snapshot && snapshot.state || this._inlineLiveStateByGuid(popup.lineGuid);
+    let source = snapshot ? snapshot.segments : (state ? this._inlineSegmentsFromState(state) : null);
+    if (!source || !source.length) source = this._cloneInlineSegments(lineItem.segments || []);
+    const liveQuery = snapshot ? snapshot.query : popup.query || '';
+    const range = source && this._inlineRangeForSegments(source, { trigger: popup.trigger, query: liveQuery });
     if (!range || !source) return null;
-    const prefix = this._inlineFlatText(this._spliceInlineSegments(source, range.start, source.reduce((n, s) => n + this._inlineSegmentLength(s), 0), [])).replace(/\u2060/g, '');
-    const remainder = this._inlineFlatText(this._spliceInlineSegments(source, range.start, range.end, [])).replace(/\u2060/g, '');
     return {
       record, recordGuid: popup.pageGuid, lineGuid: popup.lineGuid, lineItem,
       parentGuid: popup.parentGuid || state && (state.parent_guid || state.parent && state.parent.guid) || popup.pageGuid, afterLineGuid: popup.lineGuid,
-      trigger: popup.trigger, query: liveQuery, replaceStart: range.start, replaceEnd: range.end,
-      prefixText: prefix, remainingText: remainder.trim(), originalText: this._inlineFlatText(source).replace(/\u2060/g, ''),
-      originalSegments: source.map(segment => ({ type: segment.type, text: segment.text })),
+      trigger: popup.trigger, query: liveQuery,
       nativeInline: true,
     };
   }
@@ -5110,14 +5116,10 @@ ${renderTemplaterAutoTitle.toString()}
     } catch (e) {}
     if (!record || !item) { this._state.clearing.delete(guid); return; }
     const recordGuid = ev.recordGuid || record.guid || (record.getGuid && record.getGuid());
-    const originalSegments = (item.segments || [{ type: 'text', text: match.originalText }]).map(segment => ({ type: segment.type, text: segment.text }));
     const anchor = {
       record, recordGuid, lineGuid: guid, lineItem: item,
       parentGuid: item.parent_guid || recordGuid, afterLineGuid: guid,
-      prefixText: match.prefixText, originalText: match.originalText, originalSegments,
       trigger: this._inlineTrigger(), query: match.query || '',
-      replaceStart: [...String(match.prefixText || '')].length,
-      replaceEnd: [...String(match.originalText || '')].length,
     };
     this._state.inlineAnchor = anchor;
     setTimeout(() => { try { this._state.clearing.delete(guid); this._state.slashCooldown.delete(guid); } catch (e) {} }, SLASH_COOLDOWN_MS + 50);
