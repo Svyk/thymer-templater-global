@@ -74,7 +74,8 @@ function journalFixture(specs, day = new Date(2026, 6, 23)) {
         visit(line.guid);
         return { ancestors: [], descendants };
       },
-      move: async (parent, _after) => {
+      move: async (parent, after) => {
+        if (spec.move) return await spec.move(line, parent, after);
         line.parent_guid = parent.guid;
         return line;
       },
@@ -87,6 +88,47 @@ function journalFixture(specs, day = new Date(2026, 6, 23)) {
     return line;
   });
   return { record, lines };
+}
+
+function retryMoveFixture() {
+  const canonical = [
+    { guid: 'H-A', type: 'heading', text: 'Time Block', parent_guid: 'S-JOURNAL-USER-0-20260723' },
+    { guid: 'A-A', type: 'ulist', text: 'Existing', parent_guid: 'H-A' },
+    { guid: 'H-Z', type: 'heading', text: 'Time Block', parent_guid: 'S-JOURNAL-USER-0-20260723' },
+    { guid: 'MOVE-Z', type: 'ulist', text: 'Authored', parent_guid: 'H-Z' },
+  ];
+  const calls = [];
+  let snapshots = 0;
+  const record = {
+    guid: 'S-JOURNAL-USER-0-20260723',
+    getJournalDetails: () => ({ date: new Date(2026, 6, 23), userGuid: 'USER' }),
+    getLineItems: async () => {
+      const snapshot = ++snapshots;
+      return canonical.map(spec => {
+        const handle = {
+          guid: spec.guid,
+          type: spec.type,
+          parent_guid: spec.parent_guid,
+          segments: [{ type: 'text', text: spec.text }],
+          props: {},
+          snapshot,
+        };
+        handle.move = async (parent, after) => {
+          calls.push({
+            snapshot,
+            parentGuid: parent && parent.guid || null,
+            afterGuid: after && after.guid || null,
+          });
+          if (calls.length === 1) throw new Error('first shape rejected');
+          spec.parent_guid = after && after.parent_guid || parent && parent.guid || spec.parent_guid;
+          handle.parent_guid = spec.parent_guid;
+          return handle;
+        };
+        return handle;
+      });
+    },
+  };
+  return { record, calls, get snapshots() { return snapshots; } };
 }
 
 (async () => {
@@ -168,6 +210,75 @@ function journalFixture(specs, day = new Date(2026, 6, 23)) {
   assert.ok(report.deleted >= 2);
   console.log('PASS reconcile deletes only marked twins and preserves authored loser content by move');
 
+  const retry = retryMoveFixture();
+  const retryPlugin = new Plugin();
+  retryPlugin._state = state();
+  retryPlugin.data = { getRecord: () => retry.record };
+  const retryItems = await retry.record.getLineItems(false);
+  const retryContext = {
+    record: retry.record,
+    items: retryItems,
+    byGuid: new Map(retryItems.map(line => [line.guid, line])),
+    children: retryPlugin._journalChildrenMap(retryItems),
+  };
+  const retried = await retryPlugin._journalMoveLine(
+    retryContext,
+    retryContext.byGuid.get('MOVE-Z'),
+    retryContext.byGuid.get('H-A'),
+    retryContext.byGuid.get('A-A')
+  );
+  assert.strictEqual(retried.shape, 'record-parent+anchor',
+    'a rejected line-parent call falls through to the record+anchor shape');
+  assert.strictEqual(retry.calls.length, 2);
+  assert.notStrictEqual(retry.calls[0].snapshot, retry.calls[1].snapshot,
+    'each move attempt uses handles from a new record snapshot');
+  assert.deepStrictEqual(retry.calls.map(call => [call.parentGuid, call.afterGuid]), [
+    ['H-A', 'A-A'],
+    [retry.record.guid, 'A-A'],
+  ]);
+  assert.strictEqual(retryContext.byGuid.get('MOVE-Z').parent_guid, 'H-A');
+  console.log('PASS rejected first move shape re-fetches handles and succeeds with the second shape');
+
+  const probeFixture = retryMoveFixture();
+  const probePlugin = new Plugin();
+  probePlugin._state = state();
+  probePlugin.data = { getRecord: () => probeFixture.record };
+  probePlugin.ui = { getActivePanel: () => ({ getActiveRecord: () => probeFixture.record }) };
+  const probe = await probePlugin._runJournalMoveProbe({
+    lineGuid: 'MOVE-Z',
+    targetHeadingGuid: 'H-A',
+  });
+  assert.strictEqual(probe.ok, true);
+  assert.strictEqual(probe.shape, 'record-parent+anchor');
+  assert.match(probe.note, /no delete was attempted/);
+  console.log('PASS guarded MOVE_PROBE reports the successful live-compatible shape');
+
+  const rejected = journalFixture([
+    { guid: 'H-A', type: 'heading', text: 'Time Block', props: { heading_size: 2, tp_tmpl: base + '|v1', tp_tmplc: base } },
+    { guid: 'C-A', text: 'Generated', parent: 'H-A', props: { tp_tmplc: base } },
+    { guid: 'H-Z', type: 'heading', text: 'Time Block', props: { heading_size: 2, tp_tmpl: base + '|v1', tp_tmplc: base } },
+    { guid: 'C-Z', text: 'Generated', parent: 'H-Z', props: { tp_tmplc: base } },
+    { guid: 'USER-Z', text: 'keep me', parent: 'H-Z', move: async () => null },
+  ]);
+  const deferPlugin = new Plugin();
+  deferPlugin._state = state();
+  deferPlugin.data = { getRecord: () => rejected.record };
+  const scheduled = [];
+  deferPlugin._scheduleJournalReconcile = (_record, delay, reason) => scheduled.push({ delay, reason });
+  const deferred = await deferPlugin._reconcileJournalRecord(rejected.record, {
+    catalog: emptyCatalog,
+    reason: 'move-rejected',
+  });
+  assert.strictEqual(rejected.lines.find(line => line.guid === 'USER-Z').deleted, false);
+  assert.strictEqual(rejected.lines.find(line => line.guid === 'USER-Z').parent_guid, 'H-Z');
+  assert.strictEqual(rejected.lines.find(line => line.guid === 'H-Z').deleted, false,
+    'the loser heading remains while its authored child could not move');
+  assert.strictEqual(deferred.deferred, 1);
+  assert.strictEqual(deferred.moveFailures, 1);
+  assert.deepStrictEqual(deferred.errors, []);
+  assert.deepStrictEqual(scheduled, [{ delay: 30000, reason: 'move-deferred' }]);
+  console.log('PASS exhausted move shapes defer only the group and never delete the failed line');
+
   const markerless = journalFixture([
     { guid: 'H-1', type: 'heading', text: 'Quick Log', props: { heading_size: 2 } },
     { guid: 'C-1', text: 'Capture', parent: 'H-1' },
@@ -203,6 +314,7 @@ function journalFixture(specs, day = new Date(2026, 6, 23)) {
 
   assert.match(source, /_reconcileTodayAtBoot\(\)/);
   assert.match(source, /this\._state\.RECONCILE/);
+  assert.match(source, /window\.__TEMPLATER_MOVE_PROBE/);
   assert.match(source, /"lineitem\.created", "lineitem\.undeleted"/);
   assert.match(source, /2000, 'panel\.\+2s'/);
   assert.match(source, /10000, 'panel\.\+10s'/);

@@ -1,11 +1,11 @@
-// Thymer Templater v2.49.0 — Exactly-once Journal template application.
+// Thymer Templater v2.49.1 — Resilient Journal line moves.
 // Full template language: prompt / date / record.Prop / var.NAME / ref / tag /
 // include (recursion limit 3) / <%* async js %> with tp.* namespace + blocklist.
 // Frontmatter -> properties, title-setting, segment-aware nested body writer, all
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.49.0 loaded — exactly-once Journal template application.', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.49.1 loaded — resilient Journal line moves.', 'color:#10b981;font-weight:bold');
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
 const RECURSION_LIMIT = 3;
@@ -459,6 +459,15 @@ class Plugin extends AppPlugin {
       try { return await plugin._runJournalReconcileCapability(target); }
       catch (e) { plugin._journalRuntimeError('RECONCILE capability', e, { target }); throw e; }
     };
+    const moveProbe = async (input) => {
+      try { return await plugin._runJournalMoveProbe(input); }
+      catch (e) { return { ok: false, error: String(e && e.message || e) }; }
+    };
+    this._state.MOVE_PROBE = moveProbe;
+    try { window.__TEMPLATER_MOVE_PROBE = moveProbe; } catch (_e) {}
+    this._state.disposers.push(() => {
+      try { if (window.__TEMPLATER_MOVE_PROBE === moveProbe) delete window.__TEMPLATER_MOVE_PROBE; } catch (_e) {}
+    });
     this._state.listTriggers = async () => { try { return await plugin.describeTriggers(); } catch (e) { return { error: String(e && e.message || e) }; } };
     this._state.renameActive = async () => { try { return await plugin.renameFromActive(); } catch (e) { return { error: String(e && e.message || e) }; } };
     this._state.composeTitle = async (guid, pattern) => { try { const r = plugin.data.getRecord(guid); return r ? await plugin.composeTitleFromRecord(r, pattern, null) : null; } catch (e) { return { error: String(e && e.message || e) }; } };
@@ -475,7 +484,7 @@ class Plugin extends AppPlugin {
       } catch (e) { return { error: String(e && e.message || e) }; }
     };
 
-    try { window.__TEMPLATER_VERSION = '2.49.0'; } catch (e) {}
+    try { window.__TEMPLATER_VERSION = '2.49.1'; } catch (e) {}
     console.log('[Templater] commands + slash + auto-apply + triggers engine registered.');
   }
 
@@ -1085,7 +1094,7 @@ class Plugin extends AppPlugin {
     const current = (api.getConfiguration && api.getConfiguration()) || (this.getConfiguration && this.getConfiguration()) || {};
     const custom = current.custom && typeof current.custom === 'object' ? current.custom : {};
     await api.saveConfiguration(Object.assign({}, current, {
-      version: '2.49.0',
+      version: '2.49.1',
       custom: Object.assign({}, custom, { [AUTO_TITLE_RULES_KEY]: rules })
     }));
   }
@@ -1152,7 +1161,7 @@ class Plugin extends AppPlugin {
     const current = (api.getConfiguration && api.getConfiguration()) || (this.getConfiguration && this.getConfiguration()) || {};
     const custom = current.custom && typeof current.custom === 'object' ? current.custom : {};
     await api.saveConfiguration(Object.assign({}, current, {
-      version: '2.49.0',
+      version: '2.49.1',
       custom: Object.assign({}, custom, patch || {})
     }));
   }
@@ -6173,26 +6182,131 @@ ${renderTemplaterAutoTitle.toString()}
     return true;
   }
 
-  async _journalMoveLine(context, line, parent, after) {
-    if (!line || typeof line.move !== 'function') throw new Error('Journal line cannot be moved.');
-    const oldParent = line.parent_guid || '';
-    const moved = await line.move(parent, after || null);
-    if (!moved) throw new Error('Thymer rejected a GUID-preserving Journal line move.');
-    const oldList = context.children.get(oldParent) || [];
-    const oldIndex = oldList.findIndex(item => item.guid === line.guid);
-    if (oldIndex >= 0) oldList.splice(oldIndex, 1);
-    const parentGuid = parent && parent.guid || '';
+  async _freshJournalMoveHandles(context, lineGuid, parentGuid, afterGuid) {
+    let record = context && context.record;
+    if (!record) throw new Error('Journal move has no owning record.');
+    const recordGuid = record.guid || '';
+    try {
+      let resolved = recordGuid && this.data && this.data.getRecord && this.data.getRecord(recordGuid);
+      if (resolved && resolved.then) resolved = await resolved;
+      if (resolved) record = resolved;
+    } catch (_e) {}
+    const items = record.getLineItems ? await record.getLineItems(false) : [];
+    const byGuid = new Map((items || []).filter(Boolean).map(item => [item.guid, item]));
+    const line = byGuid.get(lineGuid);
+    const parent = parentGuid === recordGuid ? record : byGuid.get(parentGuid);
+    if (!line) throw new Error('Journal move line is not present in the fresh record snapshot.');
+    if (!parent) throw new Error('Journal move target is not present in the fresh record snapshot.');
+    const siblings = (items || []).filter(item =>
+      item && item.guid !== lineGuid && (item.parent_guid || recordGuid) === parentGuid);
+    let after = afterGuid ? byGuid.get(afterGuid) : null;
+    if (after && (after.parent_guid || recordGuid) !== parentGuid) after = null;
+    if (!after && siblings.length) after = siblings[siblings.length - 1];
+    return { record, recordGuid, items: items || [], byGuid, line, parent, after };
+  }
+
+  _commitJournalMoveContext(context, moved, parentGuid, afterGuid) {
+    const lineGuid = moved.guid;
+    for (const list of context.children.values()) {
+      for (let index = list.length - 1; index >= 0; index--) {
+        if (list[index] && list[index].guid === lineGuid) list.splice(index, 1);
+      }
+    }
     if (!context.children.has(parentGuid)) context.children.set(parentGuid, []);
     const target = context.children.get(parentGuid);
-    const afterIndex = after ? target.findIndex(item => item.guid === after.guid) : -1;
-    target.splice(afterIndex + 1, 0, line);
-    line.parent_guid = parentGuid;
-    if (moved !== line && moved.guid === line.guid) {
-      context.byGuid.set(line.guid, moved);
-      const at = context.items.findIndex(item => item.guid === line.guid);
-      if (at >= 0) context.items[at] = moved;
+    const afterIndex = afterGuid ? target.findIndex(item => item && item.guid === afterGuid) : -1;
+    target.splice(afterIndex + 1, 0, moved);
+    context.byGuid.set(lineGuid, moved);
+    const itemIndex = context.items.findIndex(item => item && item.guid === lineGuid);
+    if (itemIndex >= 0) context.items[itemIndex] = moved;
+    else context.items.push(moved);
+    try { moved.parent_guid = parentGuid; } catch (_e) {}
+  }
+
+  async _journalMoveLine(context, line, parent, after) {
+    const lineGuid = line && line.guid;
+    const parentGuid = parent && parent.guid;
+    const requestedAfterGuid = after && after.guid || null;
+    if (!lineGuid || !parentGuid) return null;
+    const attempts = [];
+    let priorShape = null;
+    const shapes = [
+      {
+        name: 'line-parent+anchor',
+        usable: fresh => !!fresh.after,
+        args: fresh => [fresh.parent, fresh.after],
+      },
+      {
+        name: 'record-parent+anchor',
+        usable: fresh => !!fresh.after,
+        args: fresh => [fresh.record, fresh.after],
+      },
+      {
+        name: 'anchor-only',
+        usable: fresh => !!fresh.after,
+        args: fresh => [null, fresh.after],
+      },
+      {
+        name: 'line-parent+first-child',
+        usable: () => true,
+        args: fresh => [fresh.parent, null],
+      },
+    ];
+    for (const shape of shapes) {
+      try {
+        const fresh = await this._freshJournalMoveHandles(context, lineGuid, parentGuid, requestedAfterGuid);
+        if (fresh.line.parent_guid === parentGuid) {
+          this._commitJournalMoveContext(context, fresh.line, parentGuid, fresh.after && fresh.after.guid || null);
+          const result = { line: fresh.line, shape: priorShape || 'already-target-child', attempts };
+          try { window.__TEMPLATER_LAST_MOVE = Object.freeze(Object.assign({}, result, { line: lineGuid })); } catch (_e) {}
+          return result;
+        }
+        if (!shape.usable(fresh)) continue;
+        if (typeof fresh.line.move !== 'function') throw new Error('Journal line cannot be moved.');
+        const args = shape.args(fresh);
+        const attempt = {
+          shape: shape.name,
+          lineGuid,
+          parentGuid: args[0] && args[0].guid || null,
+          afterGuid: args[1] && args[1].guid || null,
+        };
+        priorShape = shape.name;
+        let moved = null;
+        try { moved = await fresh.line.move(args[0], args[1]); }
+        catch (e) {
+          attempt.error = String(e && e.message || e);
+          attempts.push(attempt);
+          continue;
+        }
+        if (!moved || moved.guid !== lineGuid) {
+          attempt.error = 'rejected';
+          attempts.push(attempt);
+          continue;
+        }
+        if (moved.parent_guid !== parentGuid) {
+          attempt.error = 'wrong-parent:' + String(moved.parent_guid || '');
+          attempts.push(attempt);
+          continue;
+        }
+        attempt.ok = true;
+        attempts.push(attempt);
+        this._commitJournalMoveContext(context, moved, parentGuid, attempt.afterGuid);
+        const result = { line: moved, shape: shape.name, attempts };
+        try { window.__TEMPLATER_LAST_MOVE = Object.freeze(Object.assign({}, result, { line: lineGuid })); } catch (_e) {}
+        return result;
+      } catch (e) {
+        attempts.push({ shape: shape.name, lineGuid, error: String(e && e.message || e) });
+      }
     }
-    return moved;
+    try {
+      window.__TEMPLATER_LAST_MOVE = Object.freeze({
+        line: lineGuid,
+        targetParent: parentGuid,
+        ok: false,
+        attempts,
+      });
+    } catch (_e) {}
+    return null;
   }
 
   async _mergeJournalChildren(context, winnerParent, loserParent, marker, report) {
@@ -6204,7 +6318,8 @@ ${renderTemplaterAutoTitle.toString()}
       const key = this._journalLineKey(loserChild);
       const twin = winnerChildren.find(child => !usedWinner.has(child.guid) && this._journalLineKey(child) === key) || null;
       if (!twin) {
-        await this._journalMoveLine(context, loserChild, winnerParent, tail);
+        const move = await this._journalMoveLine(context, loserChild, winnerParent, tail);
+        if (!move) return false;
         tail = context.byGuid.get(loserChild.guid) || loserChild;
         report.moved++;
         continue;
@@ -6218,12 +6333,22 @@ ${renderTemplaterAutoTitle.toString()}
         await this._journalDeleteLine(context, loserChild);
         report.deleted++;
       } else {
-        await this._journalMoveLine(context, loserChild, winnerParent, tail);
+        const move = await this._journalMoveLine(context, loserChild, winnerParent, tail);
+        if (!move) return false;
         tail = context.byGuid.get(loserChild.guid) || loserChild;
         report.moved++;
       }
     }
     return true;
+  }
+
+  _deferJournalGroup(record, group, report, reason) {
+    report.deferred++;
+    report.moveFailures = (report.moveFailures || 0) + 1;
+    if (!Array.isArray(report.deferredGroups)) report.deferredGroups = [];
+    if (!report.deferredGroups.includes(group.key)) report.deferredGroups.push(group.key);
+    this._scheduleJournalReconcile(record, 30000, reason || 'move-deferred');
+    return false;
   }
 
   async _reconcileJournalGroup(record, group, catalog, pageYmd, report) {
@@ -6281,11 +6406,13 @@ ${renderTemplaterAutoTitle.toString()}
         if (line && line.guid && !seen.has(line.guid)) { seen.add(line.guid); mergedItems.push(line); }
       }
       const context = {
+        record,
         items: mergedItems,
         byGuid: new Map(mergedItems.map(line => [line.guid, line])),
         children: this._journalChildrenMap(mergedItems),
       };
-      await this._mergeJournalChildren(context, currentWinner, loser, marker, report);
+      const complete = await this._mergeJournalChildren(context, currentWinner, loser, marker, report);
+      if (!complete) return this._deferJournalGroup(record, group, report, 'move-deferred');
       const loserMarked = loser.props && loser.props.tp_tmplc === marker.child;
       if (loserMarked && this._journalLineKey(loser) === this._journalLineKey(currentWinner) &&
           !(context.children.get(loser.guid) || []).length) {
@@ -6293,10 +6420,12 @@ ${renderTemplaterAutoTitle.toString()}
         report.deleted++;
       } else {
         const winnerTail = (context.children.get(currentWinner.guid) || []).slice(-1)[0] || null;
-        await this._journalMoveLine(context, loser, currentWinner, winnerTail);
+        const move = await this._journalMoveLine(context, loser, currentWinner, winnerTail);
+        if (!move) return this._deferJournalGroup(record, group, report, 'move-deferred');
         report.moved++;
       }
     }
+    return true;
   }
 
   async _reconcileJournalRecord(record, options) {
@@ -6354,6 +6483,8 @@ ${renderTemplaterAutoTitle.toString()}
         moved: 0,
         deleted: 0,
         deferred: 0,
+        moveFailures: 0,
+        deferredGroups: [],
         errors: [],
       };
       for (const group of groups) {
@@ -6445,6 +6576,54 @@ ${renderTemplaterAutoTitle.toString()}
     const today = await this.getTodayJournalRecord();
     if (!today || !today.record) return { skipped: 'today-unavailable' };
     return await this._reconcileJournalRecord(today.record, { reason: 'deploy-boot' });
+  }
+
+  async _runJournalMoveProbe(input) {
+    input = input || {};
+    const lineGuid = String(input.lineGuid || '');
+    const targetHeadingGuid = String(input.targetHeadingGuid || '');
+    if (!lineGuid || !targetHeadingGuid) throw new Error('MOVE_PROBE requires {lineGuid, targetHeadingGuid}.');
+    if (lineGuid === targetHeadingGuid) throw new Error('MOVE_PROBE will not move a heading under itself.');
+    const panel = this.ui && this.ui.getActivePanel && this.ui.getActivePanel();
+    const record = panel && panel.getActiveRecord && panel.getActiveRecord();
+    if (!record || !this._journalDateYmd(record) || !/^S-/.test(String(record.guid || ''))) {
+      throw new Error('MOVE_PROBE requires the target synthetic Journal page to be active.');
+    }
+    const items = await this._freshLineItems(record, false);
+    const byGuid = new Map((items || []).filter(Boolean).map(item => [item.guid, item]));
+    const line = byGuid.get(lineGuid);
+    const target = byGuid.get(targetHeadingGuid);
+    if (!line || !target) throw new Error('MOVE_PROBE could not resolve both GUIDs on the active Journal page.');
+    const isHeading = target.type === 'heading' || (target.getHeadingSize && target.getHeadingSize());
+    if (!isHeading) throw new Error('MOVE_PROBE targetHeadingGuid is not a heading.');
+    let ancestorGuid = target.parent_guid || '';
+    const seen = new Set();
+    while (ancestorGuid && !seen.has(ancestorGuid)) {
+      if (ancestorGuid === lineGuid) throw new Error('MOVE_PROBE will not create a parent/descendant cycle.');
+      seen.add(ancestorGuid);
+      const ancestor = byGuid.get(ancestorGuid);
+      ancestorGuid = ancestor && ancestor.parent_guid || '';
+    }
+    const context = {
+      record,
+      items: (items || []).slice(),
+      byGuid,
+      children: this._journalChildrenMap(items),
+    };
+    const targetChildren = (context.children.get(targetHeadingGuid) || [])
+      .filter(item => item && item.guid !== lineGuid);
+    const after = targetChildren[targetChildren.length - 1] || null;
+    const result = await this._journalMoveLine(context, line, target, after);
+    return {
+      ok: !!result,
+      lineGuid,
+      targetHeadingGuid,
+      shape: result && result.shape || null,
+      attempts: result && result.attempts ||
+        (typeof window !== 'undefined' && window.__TEMPLATER_LAST_MOVE && window.__TEMPLATER_LAST_MOVE.attempts) || [],
+      note: result ? 'One GUID-preserving move completed; no delete was attempted.' :
+        'All move shapes were rejected; the line was left for a later retry and no delete was attempted.',
+    };
   }
 
   async _runJournalReconcileCapability(target) {
