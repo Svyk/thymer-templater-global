@@ -1,11 +1,11 @@
-// Thymer Templater v2.48.6 — Fresh-state atomic inline snippet commits.
+// Thymer Templater v2.49.0 — Exactly-once Journal template application.
 // Full template language: prompt / date / record.Prop / var.NAME / ref / tag /
 // include (recursion limit 3) / <%* async js %> with tp.* namespace + blocklist.
 // Frontmatter -> properties, title-setting, segment-aware nested body writer, all
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.48.6 loaded — fresh-state atomic inline snippet commits.', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.49.0 loaded — exactly-once Journal template application.', 'color:#10b981;font-weight:bold');
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
 const RECURSION_LIMIT = 3;
@@ -50,6 +50,9 @@ const AUTO_TITLE_STUB = "/* Templater Auto-title: managed collection stub */\ncl
 const AUTOTITLE_DEBOUNCE_MS = 1200;     // per-record debounce for body-strategy auto-title
 const SCHED_TICK_MS = 60000;       // schedule engine tick
 const TRIGGER_TTL_MS = 30000;      // trigger-index cache TTL
+const JOURNAL_LEASE_MS = 90000;
+const JOURNAL_LOCK_BOUND_MS = 30000;
+const JOURNAL_RECONCILE_DEBOUNCE_MS = 1500;
 const ATTR_COLL_GUID = "11NPMCN3MWHA6GGQCPSQNZP9TM";  // the Attributes collection ({{attr:Key}} token source)
 const JOURNAL_COLL_GUID = "16S1WSXAWSHVHJZ72G6J3JRTCP";
 
@@ -193,6 +196,9 @@ class Plugin extends AppPlugin {
       applying: _prev.applying || new Set(),       // records the engine is writing to — guards self-trigger loops
       lastFired: _prev.lastFired || new Map(),      // tmplGuid -> last-fired occurrence ms (mirrors the Last Fired prop)
       journalSeen: _prev.journalSeen || new Set(),  // "guid|YYYYMMDD" — journal.open dedup per page per day
+      journalReconcileTimers: new Set(),
+      journalReconcileDebounce: new Map(),
+      journalReconcileRuns: new Map(),
       scheduleClaimClientId: _prev.scheduleClaimClientId || null,
       scheduleClaimSettleMs: Number.isFinite(_prev.scheduleClaimSettleMs) ? _prev.scheduleClaimSettleMs : 1800,
       appOpenFired: false,
@@ -207,6 +213,14 @@ class Plugin extends AppPlugin {
     };
     this._state = window.__templater;
     this._state._instance = this;   // test/debug seam (mirrors __quickadd._instance)
+    this._state.disposers.push(() => {
+      try {
+        for (const timer of this._state.journalReconcileTimers || []) clearTimeout(timer);
+        for (const timer of (this._state.journalReconcileDebounce || new Map()).values()) clearTimeout(timer);
+        this._state.journalReconcileTimers.clear();
+        this._state.journalReconcileDebounce.clear();
+      } catch (e) { this._journalRuntimeError('dispose Journal RECONCILE timers', e); }
+    });
 
     // --- command palette + sidebar + status bar (GUARDRAIL #6 icons; capture remove()) ---
     // Styles live in plugin.css only (single source — injectCSS stacked across hot reloads).
@@ -253,6 +267,12 @@ class Plugin extends AppPlugin {
       const navId = this.events.on("panel.navigated", (ev) => plugin.onPanelNavigated(ev));
       this._state.eventIds.push(navId);
     } catch (e) { console.warn('[Templater] panel.navigated handler add failed:', e); }
+    for (const eventName of ["lineitem.created", "lineitem.undeleted"]) {
+      try {
+        const lineId = this.events.on(eventName, (ev) => plugin._onJournalLineConverged(ev), { collection: '*' });
+        this._state.eventIds.push(lineId);
+      } catch (e) { plugin._journalRuntimeError('register ' + eventName, e); }
+    }
     // schedule engine — tick every minute; catch-up once shortly after load (fires any time already passed today)
     try {
       this._state.schedTimer = setInterval(() => { plugin.checkSchedules('tick'); }, SCHED_TICK_MS);
@@ -260,6 +280,17 @@ class Plugin extends AppPlugin {
     } catch (e) { console.warn('[Templater] schedule engine start failed:', e); }
     // app.open — fire once per load for templates with Trigger On: app.open
     try { setTimeout(() => { plugin.fireAppOpen(); }, 2000); } catch (e) {}
+    // Deploy-time retroactive repair: today's marker-less/stale duplicate sections
+    // converge without requiring the user to revisit or edit the page.
+    try {
+      const bootReconcile = setTimeout(() => {
+        plugin._reconcileTodayAtBoot().catch(e => plugin._journalRuntimeError('boot RECONCILE', e));
+      }, 2500);
+      this._state.journalReconcileTimers.add(bootReconcile);
+      this._state.disposers.push(() => {
+        try { clearTimeout(bootReconcile); this._state.journalReconcileTimers.delete(bootReconcile); } catch (_e) {}
+      });
+    } catch (e) { plugin._journalRuntimeError('schedule boot RECONCILE', e); }
     // Triggers management command
     try {
       const tcmd = this.ui.addCommandPaletteCommand({ label: "Templater: Triggers", icon: "ti-bolt", onSelected: () => plugin.openTriggersPanel() });
@@ -424,6 +455,10 @@ class Plugin extends AppPlugin {
     // Triggers test/diagnostic spine — fire a template's trigger now, or run the schedule check immediately.
     this._state.runTrigger = async (name) => { try { return await plugin.runTriggerByName(name); } catch (e) { return { error: String(e && e.message || e) }; } };
     this._state.checkSchedulesNow = async () => { try { return await plugin.checkSchedules('manual'); } catch (e) { return { error: String(e && e.message || e) }; } };
+    this._state.RECONCILE = async (target) => {
+      try { return await plugin._runJournalReconcileCapability(target); }
+      catch (e) { plugin._journalRuntimeError('RECONCILE capability', e, { target }); throw e; }
+    };
     this._state.listTriggers = async () => { try { return await plugin.describeTriggers(); } catch (e) { return { error: String(e && e.message || e) }; } };
     this._state.renameActive = async () => { try { return await plugin.renameFromActive(); } catch (e) { return { error: String(e && e.message || e) }; } };
     this._state.composeTitle = async (guid, pattern) => { try { const r = plugin.data.getRecord(guid); return r ? await plugin.composeTitleFromRecord(r, pattern, null) : null; } catch (e) { return { error: String(e && e.message || e) }; } };
@@ -440,7 +475,7 @@ class Plugin extends AppPlugin {
       } catch (e) { return { error: String(e && e.message || e) }; }
     };
 
-    try { window.__TEMPLATER_VERSION = '2.48.6'; } catch (e) {}
+    try { window.__TEMPLATER_VERSION = '2.49.0'; } catch (e) {}
     console.log('[Templater] commands + slash + auto-apply + triggers engine registered.');
   }
 
@@ -1050,7 +1085,7 @@ class Plugin extends AppPlugin {
     const current = (api.getConfiguration && api.getConfiguration()) || (this.getConfiguration && this.getConfiguration()) || {};
     const custom = current.custom && typeof current.custom === 'object' ? current.custom : {};
     await api.saveConfiguration(Object.assign({}, current, {
-      version: '2.48.6',
+      version: '2.49.0',
       custom: Object.assign({}, custom, { [AUTO_TITLE_RULES_KEY]: rules })
     }));
   }
@@ -1117,7 +1152,7 @@ class Plugin extends AppPlugin {
     const current = (api.getConfiguration && api.getConfiguration()) || (this.getConfiguration && this.getConfiguration()) || {};
     const custom = current.custom && typeof current.custom === 'object' ? current.custom : {};
     await api.saveConfiguration(Object.assign({}, current, {
-      version: '2.48.6',
+      version: '2.49.0',
       custom: Object.assign({}, custom, patch || {})
     }));
   }
@@ -4442,6 +4477,7 @@ ${renderTemplaterAutoTitle.toString()}
 
   async writeBody(record, body, opts) {
     const flat = !!(opts && opts.flat);
+    const marker = opts && opts.marker ? opts.marker : null;
     const lines = body.split('\n');
     // Track parents per indent LEVEL so nested bullets nest correctly. Indent is normalized
     // to a level (2 spaces or 1 tab = one level) before the stack comparison, so 2-space and
@@ -4535,6 +4571,7 @@ ${renderTemplaterAutoTitle.toString()}
         console.warn('[Templater] createLineItem failed for', type, line, e);
       }
       if (created) {
+        if (marker) await this._markJournalLine(created, marker, type === 'heading');
         lastChildOf.set(parentKey, created);
         if (type === 'heading' && !flat) headingStack.push({ size: props.heading_size, item: created });
         else if (nestable) stack.push({ level, item: created });
@@ -5610,7 +5647,10 @@ ${renderTemplaterAutoTitle.toString()}
       if (!targetIsJournal && (mode === 'create' || mode === 'update') && targetCollection) {
         try { await this.applyAutoTitleRule(record, targetCollection); } catch (e) { console.warn('[Templater] trigger Auto-title rule failed', e); }
       }
-      if (body.trim()) await this.writeBody(record, body, { flat: vars && vars.nest === 'flat' });
+      if (body.trim()) await this.writeBody(record, body, {
+        flat: vars && vars.nest === 'flat',
+        marker: opts.marker || null,
+      });
       if (wantPromote) this._promoteAfterApply(record);
       try { const p = tmpl.prop && tmpl.prop(F_LASTUSED); if (p && p.setFromDate) p.setFromDate(new Date()); } catch (e) {}
       this.stampLastFired(tmpl);
@@ -5643,8 +5683,10 @@ ${renderTemplaterAutoTitle.toString()}
             const claim = await this._claimScheduleOccurrence(tmpl, due);
             if (!claim.claimed) return;                                  // another Desktop/browser client won host convergence
             await this._withTargetTemplateLock(gkey, tgt.recGuid, async () => {
+              if (tgt.mode === 'append') await this._reconcileJournalRecord(tgt.record, { reason: 'schedule.pre-apply' });
               if (tgt.mode === 'append' && await this._journalAlreadyHas(tgt.record, tmpl)) { this.stampLastFired(tmpl); return false; }
-              if (await this.fireTemplate(tmpl, Object.assign({ reason: 'schedule:' + (reason || '') }, tgt))) { fired++; return true; }
+              const marker = tgt.mode === 'append' ? this._journalMarker(tmpl, tgt.record) : null;
+              if (await this.fireTemplate(tmpl, Object.assign({ reason: 'schedule:' + (reason || ''), marker }, tgt))) { fired++; return true; }
               return false;
             });
           });
@@ -5710,10 +5752,15 @@ ${renderTemplaterAutoTitle.toString()}
   // (belt-and-suspenders behind the per-occurrence Last Fired dedup — so a lost stamp can't double-append).
   async _journalAlreadyHas(record, tmpl) {
     try {
-      const probe = this._templateProbe(tmpl); if (!probe) return false;
+      const marker = this._journalMarker(tmpl, record);
+      const probe = this._templateProbe(tmpl);
       const items = await this._freshLineItems(record, true);
+      for (const li of (items || [])) {
+        if (marker && li && li.props && li.props.tp_tmpl === marker.heading) return true;
+      }
+      if (!probe) return false;
       for (const li of (items || [])) { let t = ''; for (const s of (li.segments || [])) if (s && typeof s.text === 'string') t += s.text; if (t.indexOf(probe) >= 0) return true; }
-    } catch (e) {}
+    } catch (e) { this._journalRuntimeError('journal content probe', e); }
     return false;
   }
   // First distinctive content line of a template: skip frontmatter, heading markers, {{tokens}}, leading
@@ -5727,6 +5774,691 @@ ${renderTemplaterAutoTitle.toString()}
       if (ln.length >= 4) return ln.slice(0, 28);
     }
     return '';
+  }
+
+  _journalRuntimeError(area, error, context) {
+    const failure = {
+      at: new Date().toISOString(),
+      area: String(area || 'journal reconcile'),
+      message: String(error && error.message || error),
+      stack: error && error.stack ? String(error.stack) : null,
+      context: context || null,
+    };
+    try { window.__TEMPLATER_LAST_ERROR = failure; } catch (_e) {}
+    console.warn('[Templater] ' + failure.area, error, context || '');
+    return failure;
+  }
+
+  _journalDateYmd(record) {
+    try {
+      const details = record && record.getJournalDetails && record.getJournalDetails();
+      const date = details && details.date;
+      if (!(date instanceof Date) || isNaN(date.getTime())) return '';
+      return this._ymd(date);
+    } catch (e) {
+      this._journalRuntimeError('read Journal day', e);
+      return '';
+    }
+  }
+
+  _journalDayKey(record) {
+    const pageYmd = this._journalDateYmd(record);
+    let recordGuid = '';
+    try { recordGuid = record && (record.guid || (record.getGuid && record.getGuid())) || ''; } catch (_e) {}
+    return recordGuid && pageYmd ? recordGuid + '|' + pageYmd : '';
+  }
+
+  _journalMarker(tmpl, record) {
+    const templateGuid = this.guidOf(tmpl);
+    const pageYmd = this._journalDateYmd(record);
+    if (!templateGuid || !pageYmd) return null;
+    const child = templateGuid + '|' + pageYmd;
+    return { templateGuid, pageYmd, child, heading: child + '|v1' };
+  }
+
+  async _markJournalLine(line, marker, heading) {
+    if (!line || !marker) return false;
+    if (typeof line.setMetaProperties !== 'function') {
+      const error = new Error('Created Journal line has no setMetaProperties API.');
+      this._journalRuntimeError('mark created Journal line', error, { lineGuid: line.guid || null });
+      throw error;
+    }
+    const patch = { tp_tmplc: marker.child };
+    if (heading) patch.tp_tmpl = marker.heading;
+    try {
+      const wrote = await line.setMetaProperties(patch);
+      if (wrote === false) throw new Error('Thymer rejected Journal template line metadata.');
+      line.props = Object.assign({}, line.props || {}, patch);
+      return true;
+    } catch (e) {
+      this._journalRuntimeError('mark created Journal line', e, {
+        lineGuid: line.guid || null,
+        marker: patch,
+      });
+      throw e;
+    }
+  }
+
+  _journalLeaseStart(dayKey) {
+    if (!dayKey) return { claimed: false, reason: 'no-day-key' };
+    if (this._state.journalSeen.has(dayKey)) return { claimed: false, reason: 'memory' };
+    const key = 'tmpl-jopen:' + dayKey;
+    const ts = Date.now();
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw) {
+        let lease = null;
+        try { lease = JSON.parse(raw); } catch (_e) {
+          const legacyTs = Number(raw);
+          if (Number.isFinite(legacyTs)) lease = { ts: legacyTs, done: true };
+        }
+        if (lease && lease.done) {
+          this._state.journalSeen.add(dayKey);
+          return { claimed: false, reason: 'done', key, lease };
+        }
+        if (lease && Number.isFinite(Number(lease.ts)) && ts - Number(lease.ts) <= JOURNAL_LEASE_MS) {
+          return { claimed: false, reason: 'leased', key, lease };
+        }
+      }
+      const lease = { ts };
+      // This synchronous write is intentionally BEFORE the first await in the
+      // lock callback. A second tab cannot pass the claim check in the gap.
+      localStorage.setItem(key, JSON.stringify(lease));
+      return { claimed: true, key, lease };
+    } catch (e) {
+      this._journalRuntimeError('Journal localStorage lease', e, { dayKey });
+      return { claimed: true, key: null, lease: { ts }, storageUnavailable: true };
+    }
+  }
+
+  _journalLeaseDone(dayKey, claim) {
+    this._state.journalSeen.add(dayKey);
+    if (!claim || !claim.key) return;
+    try {
+      localStorage.setItem(claim.key, JSON.stringify({ ts: claim.lease.ts, done: true }));
+      const cutoff = Date.now() - 2 * 864e5;
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const key = localStorage.key(i);
+        if (!key || key.indexOf('tmpl-jopen:') !== 0 || key === claim.key) continue;
+        let value = null;
+        try { value = JSON.parse(localStorage.getItem(key) || 'null'); } catch (_e) {
+          const legacyTs = Number(localStorage.getItem(key));
+          value = Number.isFinite(legacyTs) ? { ts: legacyTs, done: true } : null;
+        }
+        if (value && Number(value.ts) < cutoff) localStorage.removeItem(key);
+      }
+    } catch (e) { this._journalRuntimeError('finish Journal localStorage lease', e, { dayKey }); }
+  }
+
+  async _withJournalOpenLock(dayKey, work) {
+    if (!dayKey || typeof work !== 'function') return false;
+    const run = async () => {
+      const claim = this._journalLeaseStart(dayKey);
+      if (!claim.claimed) return false;
+      let timer = null;
+      const timeout = new Promise((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('Journal-open lock work exceeded 30 seconds.')), JOURNAL_LOCK_BOUND_MS);
+      });
+      try {
+        const result = await Promise.race([Promise.resolve().then(() => work()), timeout]);
+        this._journalLeaseDone(dayKey, claim);
+        return result;
+      } catch (e) {
+        this._journalRuntimeError('Journal-open lock work', e, { dayKey });
+        throw e;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    };
+    if (typeof navigator !== 'undefined' && navigator.locks && navigator.locks.request) {
+      let entered = false;
+      try {
+        let result = false;
+        await navigator.locks.request('templater-jopen-' + dayKey, { mode: 'exclusive' }, async () => {
+          entered = true;
+          result = await run();
+        });
+        return result;
+      } catch (e) {
+        if (entered) throw e;
+        this._journalRuntimeError('Journal Web Lock unavailable; using lease fallback', e, { dayKey });
+      }
+    }
+    return await run();
+  }
+
+  _normJournalHeading(text) {
+    return String(text == null ? '' : text).replace(/\s+/g, ' ').trim().toLocaleLowerCase();
+  }
+
+  _journalSegmentValue(value) {
+    if (Array.isArray(value)) return value.map(item => this._journalSegmentValue(item));
+    if (!value || typeof value !== 'object') return value;
+    const out = {};
+    for (const key of Object.keys(value).sort()) {
+      if (typeof value[key] !== 'function' && value[key] !== undefined) out[key] = this._journalSegmentValue(value[key]);
+    }
+    return out;
+  }
+
+  _journalComparableProps(props) {
+    const out = {};
+    for (const key of Object.keys(props || {}).sort()) {
+      if (key === 'tp_tmpl' || key === 'tp_tmplc') continue;
+      if (typeof props[key] !== 'function' && props[key] !== undefined) out[key] = this._journalSegmentValue(props[key]);
+    }
+    return out;
+  }
+
+  _journalLineKey(line) {
+    return JSON.stringify({
+      type: line && line.type || 'text',
+      segments: this._journalSegmentValue(line && line.segments || []),
+      props: this._journalComparableProps(line && line.props || null),
+    });
+  }
+
+  _journalLineText(line) {
+    return (line && line.segments || []).map(segment => {
+      if (!segment) return '';
+      if (typeof segment.text === 'string') return segment.text;
+      if (segment.text && typeof segment.text === 'object') return segment.text.title || segment.text.formatted || '';
+      return '';
+    }).join('');
+  }
+
+  _journalExpectedForest(body, flat) {
+    const specs = String(body || '').split('\n').map(line => this._inlineBodyLineSpec(line)).filter(Boolean);
+    const roots = [], stack = [], headingStack = [];
+    for (const spec of specs) {
+      const node = {
+        type: spec.type,
+        segments: this.parseInlineSegments(spec.content),
+        props: spec.props || null,
+        children: [],
+      };
+      let parent = null;
+      if (flat) {
+        if (spec.nestable) {
+          while (stack.length && stack[stack.length - 1].level >= spec.level) stack.pop();
+          parent = stack.length ? stack[stack.length - 1].node : null;
+        } else stack.length = 0;
+      } else if (spec.type === 'heading') {
+        const size = spec.props.heading_size;
+        while (headingStack.length && headingStack[headingStack.length - 1].size >= size) headingStack.pop();
+        parent = headingStack.length ? headingStack[headingStack.length - 1].node : null;
+        stack.length = 0;
+      } else {
+        const scope = headingStack.length ? headingStack[headingStack.length - 1].node : null;
+        if (spec.nestable) {
+          while (stack.length && stack[stack.length - 1].level >= spec.level) stack.pop();
+          parent = stack.length ? stack[stack.length - 1].node : scope;
+        } else { stack.length = 0; parent = scope; }
+      }
+      if (parent) parent.children.push(node); else roots.push(node);
+      if (spec.type === 'heading' && !flat) headingStack.push({ size: spec.props.heading_size, node });
+      else if (spec.nestable) stack.push({ level: spec.level, node });
+    }
+    return roots;
+  }
+
+  async _journalTemplateCatalog(record) {
+    const catalog = { byNorm: new Map(), byTemplate: new Map() };
+    let templates = [];
+    try { templates = await this.loadTemplatesSorted() || []; }
+    catch (e) { this._journalRuntimeError('load Journal template catalog', e); return catalog; }
+    for (const tmpl of templates) {
+      const templateGuid = this.guidOf(tmpl);
+      if (!templateGuid) continue;
+      try {
+        let content = await this.assembleTemplateSource(tmpl);
+        const ext = (this.tField(tmpl, F_EXTENDS) || '').trim();
+        if (ext) {
+          const parent = await this.findTemplate(ext);
+          if (parent) {
+            const parentContent = await this.assembleTemplateSource(parent);
+            if (parentContent) content = parentContent + '\n' + content;
+          }
+        }
+        content = await this.resolveIncludes(content, 0, new Set());
+        let vars = {};
+        try { vars = JSON.parse(this.tField(tmpl, F_VARS) || this.tField(tmpl, 'Variables') || '{}') || {}; } catch (_e) {}
+        const rendered = await this.renderTemplate(content, {
+          record,
+          collection: null,
+          prompts: {},
+          vars: vars.defaults || {},
+          empty: vars.empty || 'skip',
+          templateName: this.tName(tmpl),
+        }, { dry: true });
+        const body = this.parseFrontmatter(rendered).body
+          .replace(/<!--(?:PLEXUS|TMPL)-[^>]*-->/g, '');
+        const roots = this._journalExpectedForest(body, vars.nest === 'flat');
+        const visit = node => {
+          if (node.type === 'heading') {
+            const norm = this._normJournalHeading(this._journalLineText(node));
+            if (norm) {
+              const entry = { templateGuid, norm, expected: node };
+              if (!catalog.byNorm.has(norm)) catalog.byNorm.set(norm, []);
+              catalog.byNorm.get(norm).push(entry);
+              const key = templateGuid + '|' + norm;
+              if (!catalog.byTemplate.has(key)) catalog.byTemplate.set(key, []);
+              catalog.byTemplate.get(key).push(entry);
+            }
+          }
+          for (const child of node.children || []) visit(child);
+        };
+        for (const root of roots) visit(root);
+      } catch (e) {
+        this._journalRuntimeError('render Journal template catalog entry', e, {
+          templateGuid,
+          templateName: this.tName(tmpl),
+        });
+      }
+    }
+    return catalog;
+  }
+
+  _parseJournalHeadingMarker(value) {
+    const match = /^(.+)\|(\d{8})\|v1$/.exec(String(value || ''));
+    return match ? { templateGuid: match[1], pageYmd: match[2] } : null;
+  }
+
+  _journalChildrenMap(items) {
+    const map = new Map();
+    for (const item of items || []) {
+      if (!item || !item.guid) continue;
+      const parent = item.parent_guid || '';
+      if (!map.has(parent)) map.set(parent, []);
+      map.get(parent).push(item);
+    }
+    return map;
+  }
+
+  async _hydrateJournalSubtree(root) {
+    if (!root) throw new Error('Cannot hydrate a missing Journal section.');
+    if (typeof root.getTreeContext === 'function') {
+      const context = await root.getTreeContext();
+      if (!context || !Array.isArray(context.descendants)) throw new Error('Journal subtree hydration returned no descendants array.');
+      return [root].concat(context.descendants);
+    }
+    if (typeof root.getChildren !== 'function') throw new Error('Journal heading cannot hydrate its children.');
+    const out = [root], seen = new Set([root.guid]);
+    const visit = async line => {
+      const children = await line.getChildren();
+      if (!Array.isArray(children)) throw new Error('Journal child hydration was incomplete.');
+      for (const child of children) {
+        if (!child || !child.guid || seen.has(child.guid)) continue;
+        seen.add(child.guid); out.push(child); await visit(child);
+      }
+    };
+    await visit(root);
+    return out;
+  }
+
+  _journalCandidateForHeading(heading, pageYmd, catalog) {
+    const norm = this._normJournalHeading(this._journalLineText(heading));
+    if (!norm) return null;
+    const marked = this._parseJournalHeadingMarker(heading && heading.props && heading.props.tp_tmpl);
+    if (marked && marked.templateGuid) {
+      const entries = catalog.byTemplate.get(marked.templateGuid + '|' + norm) || [];
+      return {
+        heading,
+        norm,
+        templateGuid: marked.templateGuid,
+        pageYmd,
+        expected: entries.length === 1 ? entries[0].expected : null,
+        adopted: marked.pageYmd !== pageYmd,
+      };
+    }
+    const entries = catalog.byNorm.get(norm) || [];
+    if (entries.length !== 1) return null;
+    return {
+      heading,
+      norm,
+      templateGuid: entries[0].templateGuid,
+      pageYmd,
+      expected: entries[0].expected,
+      adopted: true,
+    };
+  }
+
+  async _adoptExpectedJournalNode(actual, expected, marker, childrenMap, headingRoot) {
+    if (!actual || !expected || this._journalLineKey(actual) !== this._journalLineKey(expected)) return 0;
+    await this._markJournalLine(actual, marker, !!headingRoot);
+    let adopted = 1;
+    const actualChildren = (childrenMap.get(actual.guid) || []).slice();
+    const used = new Set();
+    for (const expectedChild of expected.children || []) {
+      const key = this._journalLineKey(expectedChild);
+      const match = actualChildren.find(child => !used.has(child.guid) && this._journalLineKey(child) === key);
+      if (!match) continue;
+      used.add(match.guid);
+      adopted += await this._adoptExpectedJournalNode(match, expectedChild, marker, childrenMap, false);
+    }
+    return adopted;
+  }
+
+  _journalCaretInside(guids) {
+    if (typeof document === 'undefined' || !guids || !guids.size) return false;
+    const candidates = [];
+    try { if (document.activeElement) candidates.push(document.activeElement); } catch (_e) {}
+    try {
+      for (const node of document.querySelectorAll('.flowythymer-thread-target,.listitem-with-caret')) candidates.push(node);
+    } catch (_e) {}
+    for (const node of candidates) {
+      let owner = node;
+      try { owner = node && node.closest ? node.closest('[data-guid]') : node; } catch (_e) {}
+      const guid = owner && owner.getAttribute && owner.getAttribute('data-guid');
+      if (guid && guids.has(guid)) return true;
+    }
+    return false;
+  }
+
+  _journalRemoveFromContext(context, line) {
+    context.items = context.items.filter(item => item.guid !== line.guid);
+    context.byGuid.delete(line.guid);
+    for (const list of context.children.values()) {
+      const index = list.findIndex(item => item.guid === line.guid);
+      if (index >= 0) list.splice(index, 1);
+    }
+  }
+
+  async _journalDeleteLine(context, line) {
+    if ((context.children.get(line.guid) || []).length) return false;
+    if (!line || typeof line.delete !== 'function') throw new Error('Journal line cannot be deleted.');
+    const deleted = await line.delete();
+    if (deleted === false) throw new Error('Thymer rejected deletion of an empty duplicate Journal line.');
+    this._journalRemoveFromContext(context, line);
+    return true;
+  }
+
+  async _journalMoveLine(context, line, parent, after) {
+    if (!line || typeof line.move !== 'function') throw new Error('Journal line cannot be moved.');
+    const oldParent = line.parent_guid || '';
+    const moved = await line.move(parent, after || null);
+    if (!moved) throw new Error('Thymer rejected a GUID-preserving Journal line move.');
+    const oldList = context.children.get(oldParent) || [];
+    const oldIndex = oldList.findIndex(item => item.guid === line.guid);
+    if (oldIndex >= 0) oldList.splice(oldIndex, 1);
+    const parentGuid = parent && parent.guid || '';
+    if (!context.children.has(parentGuid)) context.children.set(parentGuid, []);
+    const target = context.children.get(parentGuid);
+    const afterIndex = after ? target.findIndex(item => item.guid === after.guid) : -1;
+    target.splice(afterIndex + 1, 0, line);
+    line.parent_guid = parentGuid;
+    if (moved !== line && moved.guid === line.guid) {
+      context.byGuid.set(line.guid, moved);
+      const at = context.items.findIndex(item => item.guid === line.guid);
+      if (at >= 0) context.items[at] = moved;
+    }
+    return moved;
+  }
+
+  async _mergeJournalChildren(context, winnerParent, loserParent, marker, report) {
+    const winnerChildren = (context.children.get(winnerParent.guid) || []).slice();
+    const loserChildren = (context.children.get(loserParent.guid) || []).slice();
+    const usedWinner = new Set();
+    let tail = winnerChildren[winnerChildren.length - 1] || null;
+    for (const loserChild of loserChildren) {
+      const key = this._journalLineKey(loserChild);
+      const twin = winnerChildren.find(child => !usedWinner.has(child.guid) && this._journalLineKey(child) === key) || null;
+      if (!twin) {
+        await this._journalMoveLine(context, loserChild, winnerParent, tail);
+        tail = context.byGuid.get(loserChild.guid) || loserChild;
+        report.moved++;
+        continue;
+      }
+      usedWinner.add(twin.guid);
+      const complete = await this._mergeJournalChildren(context, twin, loserChild, marker, report);
+      if (!complete) return false;
+      const marked = loserChild.props && loserChild.props.tp_tmplc === marker.child;
+      if (marked && this._journalLineKey(loserChild) === this._journalLineKey(twin) &&
+          !(context.children.get(loserChild.guid) || []).length) {
+        await this._journalDeleteLine(context, loserChild);
+        report.deleted++;
+      } else {
+        await this._journalMoveLine(context, loserChild, winnerParent, tail);
+        tail = context.byGuid.get(loserChild.guid) || loserChild;
+        report.moved++;
+      }
+    }
+    return true;
+  }
+
+  async _reconcileJournalGroup(record, group, catalog, pageYmd, report) {
+    const items = await this._freshLineItems(record, false);
+    const byGuid = new Map((items || []).filter(Boolean).map(item => [item.guid, item]));
+    const candidates = group.guids.map(guid => byGuid.get(guid)).filter(Boolean)
+      .filter(line => this._normJournalHeading(this._journalLineText(line)) === group.norm)
+      .sort((a, b) => String(a.guid).localeCompare(String(b.guid)));
+    if (!candidates.length) return;
+    const marker = {
+      templateGuid: group.templateGuid,
+      pageYmd,
+      child: group.templateGuid + '|' + pageYmd,
+      heading: group.templateGuid + '|' + pageYmd + '|v1',
+    };
+    const hydratedItems = (items || []).slice();
+    const hydratedGuids = new Set(hydratedItems.map(line => line && line.guid).filter(Boolean));
+    for (const heading of candidates) {
+      for (const line of await this._hydrateJournalSubtree(heading)) {
+        if (line && line.guid && !hydratedGuids.has(line.guid)) {
+          hydratedGuids.add(line.guid);
+          hydratedItems.push(line);
+        }
+      }
+    }
+    const children = this._journalChildrenMap(hydratedItems);
+    const expectedEntries = catalog.byTemplate.get(group.templateGuid + '|' + group.norm) || [];
+    const expected = expectedEntries.length === 1 ? expectedEntries[0].expected : null;
+    if (expected) {
+      for (const heading of candidates) report.adopted += await this._adoptExpectedJournalNode(heading, expected, marker, children, true);
+    } else {
+      await this._markJournalLine(candidates[0], marker, true);
+      report.adopted++;
+    }
+    if (candidates.length < 2) return;
+    const winner = candidates[0];
+    for (const originalLoser of candidates.slice(1)) {
+      const currentItems = await this._freshLineItems(record, false);
+      const currentByGuid = new Map((currentItems || []).filter(Boolean).map(item => [item.guid, item]));
+      const currentWinner = currentByGuid.get(winner.guid);
+      const loser = currentByGuid.get(originalLoser.guid);
+      if (!currentWinner || !loser) continue;
+      if (this._normJournalHeading(this._journalLineText(currentWinner)) !== group.norm ||
+          this._normJournalHeading(this._journalLineText(loser)) !== group.norm) continue;
+      const hydrated = (await this._hydrateJournalSubtree(currentWinner)).concat(await this._hydrateJournalSubtree(loser));
+      const subtreeGuids = new Set(hydrated.map(line => line && line.guid).filter(Boolean));
+      if (this._journalCaretInside(subtreeGuids)) {
+        report.deferred++;
+        this._scheduleJournalReconcile(record, 30000, 'caret-deferred');
+        continue;
+      }
+      const mergedItems = [];
+      const seen = new Set();
+      for (const line of currentItems.concat(hydrated)) {
+        if (line && line.guid && !seen.has(line.guid)) { seen.add(line.guid); mergedItems.push(line); }
+      }
+      const context = {
+        items: mergedItems,
+        byGuid: new Map(mergedItems.map(line => [line.guid, line])),
+        children: this._journalChildrenMap(mergedItems),
+      };
+      await this._mergeJournalChildren(context, currentWinner, loser, marker, report);
+      const loserMarked = loser.props && loser.props.tp_tmplc === marker.child;
+      if (loserMarked && this._journalLineKey(loser) === this._journalLineKey(currentWinner) &&
+          !(context.children.get(loser.guid) || []).length) {
+        await this._journalDeleteLine(context, loser);
+        report.deleted++;
+      } else {
+        const winnerTail = (context.children.get(currentWinner.guid) || []).slice(-1)[0] || null;
+        await this._journalMoveLine(context, loser, currentWinner, winnerTail);
+        report.moved++;
+      }
+    }
+  }
+
+  async _reconcileJournalRecord(record, options) {
+    options = options || {};
+    const dayKey = this._journalDayKey(record);
+    if (!dayKey) return { skipped: 'not-journal' };
+    const existingRun = this._state.journalReconcileRuns.get(dayKey);
+    if (existingRun) return await existingRun;
+    const run = (async () => {
+      let current = record;
+      try {
+        let resolved = this.data && this.data.getRecord && this.data.getRecord(record.guid);
+        if (resolved && resolved.then) resolved = await resolved;
+        if (resolved) current = resolved;
+      } catch (e) { this._journalRuntimeError('resolve Journal for RECONCILE', e, { dayKey }); }
+      const pageYmd = this._journalDateYmd(current);
+      const catalog = options.catalog || await this._journalTemplateCatalog(current);
+      const items = await this._freshLineItems(current, true);
+      const candidates = [];
+      for (const line of items || []) {
+        const isHeading = line && (line.type === 'heading' || (line.getHeadingSize && line.getHeadingSize()));
+        if (!isHeading) continue;
+        const candidate = this._journalCandidateForHeading(line, pageYmd, catalog);
+        if (candidate) candidates.push(candidate);
+      }
+      const grouped = new Map();
+      for (const candidate of candidates) {
+        const key = candidate.templateGuid + '|' + pageYmd + '|' + candidate.norm;
+        if (!grouped.has(key)) grouped.set(key, {
+          key,
+          templateGuid: candidate.templateGuid,
+          norm: candidate.norm,
+          guids: [],
+        });
+        grouped.get(key).guids.push(candidate.heading.guid);
+      }
+      const parentByGuid = new Map((items || []).map(line => [line.guid, line.parent_guid || '']));
+      const depth = guid => {
+        let count = 0, currentGuid = guid, seen = new Set();
+        while (parentByGuid.has(currentGuid) && !seen.has(currentGuid)) {
+          seen.add(currentGuid); currentGuid = parentByGuid.get(currentGuid); count++;
+        }
+        return count;
+      };
+      const groups = [...grouped.values()].sort((a, b) => {
+        const ad = Math.max(...a.guids.map(depth)), bd = Math.max(...b.guids.map(depth));
+        return bd - ad || a.key.localeCompare(b.key);
+      });
+      const report = {
+        dayKey,
+        reason: options.reason || 'reconcile',
+        groups: groups.length,
+        duplicateGroups: groups.filter(group => group.guids.length > 1).length,
+        adopted: 0,
+        moved: 0,
+        deleted: 0,
+        deferred: 0,
+        errors: [],
+      };
+      for (const group of groups) {
+        try { await this._reconcileJournalGroup(current, group, catalog, pageYmd, report); }
+        catch (e) { report.errors.push(this._journalRuntimeError('reconcile Journal template group', e, { dayKey, group: group.key })); }
+      }
+      try {
+        window.__TEMPLATER_LAST_RECONCILE = Object.freeze(Object.assign({}, report));
+      } catch (_e) {}
+      return report;
+    })();
+    this._state.journalReconcileRuns.set(dayKey, run);
+    try { return await run; }
+    finally { if (this._state.journalReconcileRuns.get(dayKey) === run) this._state.journalReconcileRuns.delete(dayKey); }
+  }
+
+  _scheduleJournalReconcile(record, delay, reason) {
+    if (!record) return null;
+    let guid = '';
+    try { guid = record.guid || (record.getGuid && record.getGuid()) || ''; } catch (_e) {}
+    const key = guid + '|' + String(reason || 'scheduled') + '|' + String(delay || 0);
+    if (this._state.journalReconcileDebounce.has(key)) clearTimeout(this._state.journalReconcileDebounce.get(key));
+    const timer = setTimeout(() => {
+      this._state.journalReconcileDebounce.delete(key);
+      this._state.journalReconcileTimers.delete(timer);
+      this._reconcileJournalRecord(record, { reason: reason || 'scheduled' })
+        .catch(e => this._journalRuntimeError('scheduled Journal RECONCILE', e, { guid, reason }));
+    }, Math.max(0, Number(delay) || 0));
+    this._state.journalReconcileDebounce.set(key, timer);
+    this._state.journalReconcileTimers.add(timer);
+    return timer;
+  }
+
+  async _journalRecordFromEvent(event) {
+    if (!event || !event.recordGuid) return null;
+    let record = null;
+    try {
+      record = this.data && this.data.getRecord && this.data.getRecord(event.recordGuid);
+      if (record && record.then) record = await record;
+    } catch (e) { this._journalRuntimeError('resolve Journal line event record', e, { recordGuid: event.recordGuid }); }
+    if (!record && event.getLineItem) {
+      try {
+        const line = await event.getLineItem();
+        record = line && line.getRecord && line.getRecord();
+      } catch (e) { this._journalRuntimeError('resolve Journal line event item', e, { recordGuid: event.recordGuid }); }
+    }
+    if (record && this._journalDateYmd(record)) return record;
+    const match = /^S-([A-Za-z0-9]+)-.*?(\d{8})$/.exec(String(event.recordGuid));
+    if (!match) return null;
+    try {
+      const cols = await this.getCollectionsCached();
+      const journal = cols.find(col => {
+        try {
+          return (col.getGuid && col.getGuid() === (event.collectionGuid || match[1])) &&
+            col.isJournalPlugin && col.isJournalPlugin();
+        } catch (_e) { return false; }
+      });
+      const user = this.data.getActiveUsers && this.data.getActiveUsers()[0];
+      if (!journal || !user || !journal.getJournalRecord) return null;
+      const iso = match[2].slice(0, 4) + '-' + match[2].slice(4, 6) + '-' + match[2].slice(6);
+      const dateValue = typeof DateTime !== 'undefined' && DateTime.parseDateTimeString
+        ? DateTime.parseDateTimeString(iso)
+        : undefined;
+      return await journal.getJournalRecord(user, dateValue);
+    } catch (e) {
+      this._journalRuntimeError('resolve synthetic Journal event record', e, { recordGuid: event.recordGuid });
+      return null;
+    }
+  }
+
+  _onJournalLineConverged(event) {
+    const recordGuid = event && event.recordGuid;
+    if (!recordGuid || !/^S-/.test(String(recordGuid))) return;
+    const key = 'event:' + recordGuid;
+    if (this._state.journalReconcileDebounce.has(key)) clearTimeout(this._state.journalReconcileDebounce.get(key));
+    const timer = setTimeout(async () => {
+      this._state.journalReconcileDebounce.delete(key);
+      this._state.journalReconcileTimers.delete(timer);
+      try {
+        const record = await this._journalRecordFromEvent(event);
+        if (record) await this._reconcileJournalRecord(record, { reason: 'lineitem.converged' });
+      } catch (e) { this._journalRuntimeError('lineitem-triggered Journal RECONCILE', e, { recordGuid }); }
+    }, JOURNAL_RECONCILE_DEBOUNCE_MS);
+    this._state.journalReconcileDebounce.set(key, timer);
+    this._state.journalReconcileTimers.add(timer);
+  }
+
+  async _reconcileTodayAtBoot() {
+    const today = await this.getTodayJournalRecord();
+    if (!today || !today.record) return { skipped: 'today-unavailable' };
+    return await this._reconcileJournalRecord(today.record, { reason: 'deploy-boot' });
+  }
+
+  async _runJournalReconcileCapability(target) {
+    let record = target && typeof target === 'object' ? target : null;
+    if (!record && typeof target === 'string') {
+      record = this.data && this.data.getRecord && this.data.getRecord(target);
+      if (record && record.then) record = await record;
+    }
+    if (!record) {
+      const today = await this.getTodayJournalRecord();
+      record = today && today.record;
+    }
+    if (!record) throw new Error('RECONCILE could not resolve a Journal page.');
+    return await this._reconcileJournalRecord(record, { reason: 'RECONCILE' });
   }
 
   // --- event handlers ---
@@ -5766,32 +6498,43 @@ ${renderTemplaterAutoTitle.toString()}
       }
       let jd = null; try { jd = rec.getJournalDetails && rec.getJournalDetails(); } catch (e) {}
       if (!jd) return;
-      const idx = await this.getTriggerIndex(); const tmpls = idx.byEvent['journal.open']; if (!tmpls || !tmpls.length) return;
-      const recGuid = rec.guid; const dayKey = recGuid + '|' + this._ymd(new Date());
-      if (this._state.journalSeen.has(dayKey)) return;
-      // CROSS-TAB dedup (v2.44.1): journalSeen is per-instance, so every open browser tab
-      // fired the journal.open templates once → N tabs = N duplicate template blocks. A
-      // localStorage claim is shared across all tabs of the SAME browser, so the first tab
-      // to open the day wins and every other tab skips. (The content re-check below still
-      // backstops cross-device races.) TTL-stamped so the key set can't grow unbounded.
-      try {
-        const LK = 'tmpl-jopen:' + dayKey;
-        if (localStorage.getItem(LK)) { this._state.journalSeen.add(dayKey); return; }
-        localStorage.setItem(LK, String(Date.now()));
-        // opportunistic GC of claims older than 2 days
-        try { const cutoff = Date.now() - 2 * 864e5; for (let i = localStorage.length - 1; i >= 0; i--) { const k = localStorage.key(i); if (k && k.indexOf('tmpl-jopen:') === 0) { const v = +localStorage.getItem(k); if (v && v < cutoff) localStorage.removeItem(k); } } } catch (_e) {}
-      } catch (_e) {}
-      this._state.journalSeen.add(dayKey);
-      const cols = await this.getCollectionsCached(); const jcol = cols.find(c => { try { return c.isJournalPlugin && c.isJournalPlugin(); } catch (e) { return false; } }) || null;
-      for (const tmpl of tmpls) { try {
-        if (!(await this.evalCondition(this.conditionOf(tmpl), recGuid))) continue;
-        const templateGuid = this.guidOf(tmpl); if (!templateGuid) continue;
-        await this._withTargetTemplateLock(templateGuid, recGuid, async () => {
-          if (await this._journalAlreadyHas(rec, tmpl)) return false;
-          return await this.fireTemplate(tmpl, { record: rec, recGuid, targetCollection: jcol, mode: 'append', reason: 'journal.open' });
-        });
-      } catch (e) { console.warn('[Templater] journal-open trigger error', e); } }
-    } catch (e) { console.warn('[Templater] onPanelNavigated error', e); }
+      const recGuid = rec.guid;
+      const dayKey = this._journalDayKey(rec);
+      if (!dayKey) return;
+      // Every navigation converges independently of whether this tab owns the
+      // apply lease. The immediate run is also repeated after remote writes
+      // normally settle into this client.
+      this._scheduleJournalReconcile(rec, 0, 'panel.pre');
+      this._scheduleJournalReconcile(rec, 2000, 'panel.+2s');
+      this._scheduleJournalReconcile(rec, 10000, 'panel.+10s');
+      await this._withJournalOpenLock(dayKey, async () => {
+        await this._reconcileJournalRecord(rec, { reason: 'journal.open.pre-apply' });
+        const idx = await this.getTriggerIndex();
+        const tmpls = idx.byEvent['journal.open'];
+        if (!tmpls || !tmpls.length) return false;
+        const cols = await this.getCollectionsCached();
+        const jcol = cols.find(c => { try { return c.isJournalPlugin && c.isJournalPlugin(); } catch (e) { return false; } }) || null;
+        for (const tmpl of tmpls) {
+          try {
+            if (!(await this.evalCondition(this.conditionOf(tmpl), recGuid))) continue;
+            const templateGuid = this.guidOf(tmpl); if (!templateGuid) continue;
+            const marker = this._journalMarker(tmpl, rec);
+            await this._withTargetTemplateLock(templateGuid, recGuid, async () => {
+              if (await this._journalAlreadyHas(rec, tmpl)) return false;
+              return await this.fireTemplate(tmpl, {
+                record: rec,
+                recGuid,
+                targetCollection: jcol,
+                mode: 'append',
+                reason: 'journal.open',
+                marker,
+              });
+            });
+          } catch (e) { this._journalRuntimeError('journal.open template', e, { recGuid, templateGuid: this.guidOf(tmpl) }); }
+        }
+        return true;
+      });
+    } catch (e) { this._journalRuntimeError('onPanelNavigated', e); }
   }
   async fireAppOpen() {
     try {
@@ -5801,11 +6544,13 @@ ${renderTemplaterAutoTitle.toString()}
         if (!(await this.evalCondition(this.conditionOf(tmpl)))) continue;
         const tgt = await this.resolveTarget(tmpl), templateGuid = this.guidOf(tmpl); if (!tgt || !templateGuid) continue;
         await this._withTargetTemplateLock(templateGuid, tgt.recGuid, async () => {
+          if (tgt.mode === 'append') await this._reconcileJournalRecord(tgt.record, { reason: 'app.open.pre-apply' });
           if (tgt.mode === 'append' && await this._journalAlreadyHas(tgt.record, tmpl)) return false;
-          return await this.fireTemplate(tmpl, Object.assign({ reason: 'app.open' }, tgt));
+          const marker = tgt.mode === 'append' ? this._journalMarker(tmpl, tgt.record) : null;
+          return await this.fireTemplate(tmpl, Object.assign({ reason: 'app.open', marker }, tgt));
         });
-      } catch (e) { console.warn('[Templater] app.open trigger error', e); } }
-    } catch (e) { console.warn('[Templater] fireAppOpen error', e); }
+      } catch (e) { this._journalRuntimeError('app.open trigger', e, { templateGuid: this.guidOf(tmpl) }); } }
+    } catch (e) { this._journalRuntimeError('fireAppOpen', e); }
   }
   _ymd(d) { return '' + d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0'); }
 
