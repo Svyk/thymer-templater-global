@@ -279,6 +279,117 @@ function retryMoveFixture() {
   assert.deepStrictEqual(scheduled, [{ delay: 30000, reason: 'move-deferred' }]);
   console.log('PASS exhausted move shapes defer only the group and never delete the failed line');
 
+  const legacyExpected = {
+    type: 'heading',
+    segments: [{ type: 'text', text: 'Quick Log' }],
+    props: { heading_size: 2 },
+    children: [],
+  };
+  const legacyEntry = {
+    templateGuid: 'LEGACY-TEMPLATE',
+    norm: 'quick log',
+    expected: legacyExpected,
+  };
+  const legacyCatalog = {
+    byNorm: new Map([['quick log', [legacyEntry]]]),
+    byTemplate: new Map([['LEGACY-TEMPLATE|quick log', [legacyEntry]]]),
+  };
+  const emptyLegacy = journalFixture([
+    { guid: 'H-A', type: 'heading', text: 'Quick Log', props: { heading_size: 2, legacy: true } },
+    { guid: 'H-Z', type: 'heading', text: '  Quick   Log  ', props: { heading_size: 2, legacy: true } },
+  ]);
+  const emptyLegacyPlugin = new Plugin();
+  emptyLegacyPlugin._state = state();
+  emptyLegacyPlugin.data = { getRecord: () => emptyLegacy.record };
+  const emptyLegacyReport = await emptyLegacyPlugin._reconcileJournalRecord(emptyLegacy.record, {
+    catalog: legacyCatalog,
+    reason: 'empty-markerless-loser',
+  });
+  assert.strictEqual(emptyLegacy.lines.find(line => line.guid === 'H-A').props.tp_tmpl, undefined,
+    'legacy-only props prevent marker adoption in this regression fixture');
+  assert.strictEqual(emptyLegacy.lines.find(line => line.guid === 'H-Z').props.tp_tmplc, undefined);
+  assert.strictEqual(emptyLegacy.lines.find(line => line.guid === 'H-Z').deleted, true,
+    'freshly proven empty exact-duplicate marker-less loser is deleted');
+  assert.strictEqual(emptyLegacyReport.deleted, 1);
+  assert.strictEqual(emptyLegacyReport.moved, 0);
+  assert.deepStrictEqual(emptyLegacyReport.movedLines, []);
+  console.log('PASS empty exact-duplicate marker-less loser is deleted from a fresh child proof');
+
+  const populatedLegacy = journalFixture([
+    { guid: 'H-A', type: 'heading', text: 'Quick Log', props: { heading_size: 2, legacy: true } },
+    { guid: 'H-Z', type: 'heading', text: 'Quick Log', props: { heading_size: 2, legacy: true } },
+    { guid: 'USER-Z', text: 'keep me', parent: 'H-Z', move: async () => null },
+  ]);
+  const populatedLegacyPlugin = new Plugin();
+  populatedLegacyPlugin._state = state();
+  populatedLegacyPlugin.data = { getRecord: () => populatedLegacy.record };
+  populatedLegacyPlugin._scheduleJournalReconcile = () => null;
+  const populatedLegacyReport = await populatedLegacyPlugin._reconcileJournalRecord(populatedLegacy.record, {
+    catalog: legacyCatalog,
+    reason: 'nonempty-markerless-loser',
+  });
+  assert.strictEqual(populatedLegacy.lines.find(line => line.guid === 'H-Z').deleted, false,
+    'a marker-less loser with a child that did not dispatch is never deleted');
+  assert.strictEqual(populatedLegacy.lines.find(line => line.guid === 'USER-Z').parent_guid, 'H-Z');
+  assert.strictEqual(populatedLegacyReport.deleted, 0);
+  assert.strictEqual(populatedLegacyReport.deferred, 1);
+  assert.strictEqual(populatedLegacyReport.moveFailures, 1);
+  console.log('PASS non-empty marker-less loser is preserved when child dispatch cannot complete');
+
+  let idempotentMoveCalls = 0;
+  const idempotentLegacy = journalFixture([
+    { guid: 'H-A', type: 'heading', text: 'Quick Log', props: { heading_size: 2, legacy: true } },
+    { guid: 'H-Z', type: 'heading', text: 'Quick Log', props: { heading_size: 2, legacy: true } },
+    {
+      guid: 'USER-Z',
+      text: 'Authored once',
+      parent: 'H-Z',
+      move: async (line, parent, after) => {
+        idempotentMoveCalls++;
+        line.parent_guid = after && after.parent_guid || parent.guid;
+        return line;
+      },
+    },
+  ]);
+  const idempotentPlugin = new Plugin();
+  idempotentPlugin._state = state();
+  idempotentPlugin.data = { getRecord: () => idempotentLegacy.record };
+  const firstIdempotentReport = await idempotentPlugin._reconcileJournalRecord(idempotentLegacy.record, {
+    catalog: legacyCatalog,
+    reason: 'idempotence-pass-1',
+  });
+  assert.strictEqual(firstIdempotentReport.moved, 1);
+  assert.deepStrictEqual(firstIdempotentReport.movedLines, [{
+    guid: 'USER-Z',
+    text: 'Authored once',
+  }]);
+  assert.deepStrictEqual(window.__TEMPLATER_LAST_RECONCILE.movedLines, firstIdempotentReport.movedLines);
+  assert.strictEqual(idempotentMoveCalls, 1);
+  const settledItems = await idempotentLegacy.record.getLineItems(false);
+  const settledContext = {
+    record: idempotentLegacy.record,
+    items: settledItems,
+    byGuid: new Map(settledItems.map(line => [line.guid, line])),
+    children: idempotentPlugin._journalChildrenMap(settledItems),
+  };
+  const alreadySettled = await idempotentPlugin._journalMoveLine(
+    settledContext,
+    settledContext.byGuid.get('USER-Z'),
+    settledContext.byGuid.get('H-A'),
+    null
+  );
+  assert.strictEqual(alreadySettled.moved, false);
+  assert.strictEqual(alreadySettled.shape, 'already-target-child');
+  assert.strictEqual(idempotentMoveCalls, 1, 'an already-settled line does not call the SDK move API again');
+  const secondIdempotentReport = await idempotentPlugin._reconcileJournalRecord(idempotentLegacy.record, {
+    catalog: legacyCatalog,
+    reason: 'idempotence-pass-2',
+  });
+  assert.strictEqual(secondIdempotentReport.moved, 0);
+  assert.deepStrictEqual(secondIdempotentReport.movedLines, []);
+  assert.strictEqual(idempotentMoveCalls, 1);
+  console.log('PASS moved-line diagnostics and reconciliation are idempotent across two passes');
+
   const markerless = journalFixture([
     { guid: 'H-1', type: 'heading', text: 'Quick Log', props: { heading_size: 2 } },
     { guid: 'C-1', text: 'Capture', parent: 'H-1' },

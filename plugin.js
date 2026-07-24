@@ -1,11 +1,11 @@
-// Thymer Templater v2.49.1 — Resilient Journal line moves.
+// Thymer Templater v2.49.2 — Lossless empty legacy-heading reconciliation.
 // Full template language: prompt / date / record.Prop / var.NAME / ref / tag /
 // include (recursion limit 3) / <%* async js %> with tp.* namespace + blocklist.
 // Frontmatter -> properties, title-setting, segment-aware nested body writer, all
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.49.1 loaded — resilient Journal line moves.', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.49.2 loaded — lossless empty legacy-heading reconciliation.', 'color:#10b981;font-weight:bold');
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
 const RECURSION_LIMIT = 3;
@@ -484,7 +484,7 @@ class Plugin extends AppPlugin {
       } catch (e) { return { error: String(e && e.message || e) }; }
     };
 
-    try { window.__TEMPLATER_VERSION = '2.49.1'; } catch (e) {}
+    try { window.__TEMPLATER_VERSION = '2.49.2'; } catch (e) {}
     console.log('[Templater] commands + slash + auto-apply + triggers engine registered.');
   }
 
@@ -1094,7 +1094,7 @@ class Plugin extends AppPlugin {
     const current = (api.getConfiguration && api.getConfiguration()) || (this.getConfiguration && this.getConfiguration()) || {};
     const custom = current.custom && typeof current.custom === 'object' ? current.custom : {};
     await api.saveConfiguration(Object.assign({}, current, {
-      version: '2.49.1',
+      version: '2.49.2',
       custom: Object.assign({}, custom, { [AUTO_TITLE_RULES_KEY]: rules })
     }));
   }
@@ -1161,7 +1161,7 @@ class Plugin extends AppPlugin {
     const current = (api.getConfiguration && api.getConfiguration()) || (this.getConfiguration && this.getConfiguration()) || {};
     const custom = current.custom && typeof current.custom === 'object' ? current.custom : {};
     await api.saveConfiguration(Object.assign({}, current, {
-      version: '2.49.1',
+      version: '2.49.2',
       custom: Object.assign({}, custom, patch || {})
     }));
   }
@@ -6182,6 +6182,49 @@ ${renderTemplaterAutoTitle.toString()}
     return true;
   }
 
+  async _journalDeleteEmptyDuplicateHeading(context, group, winnerGuid, loserGuid) {
+    const record = context && context.record;
+    if (!record || !group || !winnerGuid || !loserGuid || winnerGuid === loserGuid) return false;
+    const items = await this._freshLineItems(record, false);
+    const byGuid = new Map((items || []).filter(Boolean).map(line => [line.guid, line]));
+    const winner = byGuid.get(winnerGuid);
+    const loser = byGuid.get(loserGuid);
+    if (!winner || !loser) return false;
+    const isHeading = line => line && (line.type === 'heading' || (line.getHeadingSize && line.getHeadingSize()));
+    if (!isHeading(winner) || !isHeading(loser)) return false;
+    const winnerNorm = this._normJournalHeading(this._journalLineText(winner));
+    const loserNorm = this._normJournalHeading(this._journalLineText(loser));
+    if (!winnerNorm || winnerNorm !== loserNorm || winnerNorm !== group.norm) return false;
+    const liveGroupGuids = (group.guids || []).filter(guid => {
+      const line = byGuid.get(guid);
+      return isHeading(line) &&
+        this._normJournalHeading(this._journalLineText(line)) === group.norm;
+    }).sort((a, b) => String(a).localeCompare(String(b)));
+    if (liveGroupGuids[0] !== winnerGuid || !liveGroupGuids.slice(1).includes(loserGuid)) return false;
+    if ((items || []).some(line => line && line.parent_guid === loserGuid)) return false;
+    const freshContext = {
+      record,
+      items: (items || []).slice(),
+      byGuid,
+      children: this._journalChildrenMap(items),
+    };
+    const deleted = await this._journalDeleteLine(freshContext, loser);
+    if (deleted) this._journalRemoveFromContext(context, loser);
+    return deleted;
+  }
+
+  _journalRecordMovedLine(report, line, move) {
+    if (!move || move.moved !== true) return false;
+    report.moved++;
+    if (!Array.isArray(report.movedLines)) report.movedLines = [];
+    const movedLine = move.line || line;
+    report.movedLines.push({
+      guid: movedLine && movedLine.guid || line && line.guid || null,
+      text: this._journalLineText(movedLine || line),
+    });
+    return true;
+  }
+
   async _freshJournalMoveHandles(context, lineGuid, parentGuid, afterGuid) {
     let record = context && context.record;
     if (!record) throw new Error('Journal move has no owning record.');
@@ -6257,7 +6300,12 @@ ${renderTemplaterAutoTitle.toString()}
         const fresh = await this._freshJournalMoveHandles(context, lineGuid, parentGuid, requestedAfterGuid);
         if (fresh.line.parent_guid === parentGuid) {
           this._commitJournalMoveContext(context, fresh.line, parentGuid, fresh.after && fresh.after.guid || null);
-          const result = { line: fresh.line, shape: priorShape || 'already-target-child', attempts };
+          const result = {
+            line: fresh.line,
+            shape: 'already-target-child',
+            moved: false,
+            attempts,
+          };
           try { window.__TEMPLATER_LAST_MOVE = Object.freeze(Object.assign({}, result, { line: lineGuid })); } catch (_e) {}
           return result;
         }
@@ -6291,7 +6339,7 @@ ${renderTemplaterAutoTitle.toString()}
         attempt.ok = true;
         attempts.push(attempt);
         this._commitJournalMoveContext(context, moved, parentGuid, attempt.afterGuid);
-        const result = { line: moved, shape: shape.name, attempts };
+        const result = { line: moved, shape: shape.name, moved: true, attempts };
         try { window.__TEMPLATER_LAST_MOVE = Object.freeze(Object.assign({}, result, { line: lineGuid })); } catch (_e) {}
         return result;
       } catch (e) {
@@ -6321,7 +6369,7 @@ ${renderTemplaterAutoTitle.toString()}
         const move = await this._journalMoveLine(context, loserChild, winnerParent, tail);
         if (!move) return false;
         tail = context.byGuid.get(loserChild.guid) || loserChild;
-        report.moved++;
+        this._journalRecordMovedLine(report, loserChild, move);
         continue;
       }
       usedWinner.add(twin.guid);
@@ -6336,7 +6384,7 @@ ${renderTemplaterAutoTitle.toString()}
         const move = await this._journalMoveLine(context, loserChild, winnerParent, tail);
         if (!move) return false;
         tail = context.byGuid.get(loserChild.guid) || loserChild;
-        report.moved++;
+        this._journalRecordMovedLine(report, loserChild, move);
       }
     }
     return true;
@@ -6418,11 +6466,15 @@ ${renderTemplaterAutoTitle.toString()}
           !(context.children.get(loser.guid) || []).length) {
         await this._journalDeleteLine(context, loser);
         report.deleted++;
+      } else if (await this._journalDeleteEmptyDuplicateHeading(
+        context, group, currentWinner.guid, loser.guid
+      )) {
+        report.deleted++;
       } else {
         const winnerTail = (context.children.get(currentWinner.guid) || []).slice(-1)[0] || null;
         const move = await this._journalMoveLine(context, loser, currentWinner, winnerTail);
         if (!move) return this._deferJournalGroup(record, group, report, 'move-deferred');
-        report.moved++;
+        this._journalRecordMovedLine(report, loser, move);
       }
     }
     return true;
@@ -6481,6 +6533,7 @@ ${renderTemplaterAutoTitle.toString()}
         duplicateGroups: groups.filter(group => group.guids.length > 1).length,
         adopted: 0,
         moved: 0,
+        movedLines: [],
         deleted: 0,
         deferred: 0,
         moveFailures: 0,
@@ -6492,7 +6545,9 @@ ${renderTemplaterAutoTitle.toString()}
         catch (e) { report.errors.push(this._journalRuntimeError('reconcile Journal template group', e, { dayKey, group: group.key })); }
       }
       try {
-        window.__TEMPLATER_LAST_RECONCILE = Object.freeze(Object.assign({}, report));
+        window.__TEMPLATER_LAST_RECONCILE = Object.freeze(Object.assign({}, report, {
+          movedLines: report.movedLines.map(line => Object.freeze(Object.assign({}, line))),
+        }));
       } catch (_e) {}
       return report;
     })();
