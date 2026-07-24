@@ -1,3 +1,9 @@
+// Thymer Templater v2.49.3 — Fleet caret-detection fix (U7b).
+//   Thymer's new bundle removed .listitem-with-caret. Add shared _journalCaretLineGuid()
+//   helper with three-tier detection: g_item?.state?.guid → .listitem-with-caret[data-guid]
+//   (legacy builds) → .flowythymer-thread-target closest [data-guid] (last resort).
+//   _journalCaretInside now routes through the helper for the fast path, with the
+//   activeElement walk-up retained as a secondary fallback.
 // Thymer Templater v2.49.2 — Lossless empty legacy-heading reconciliation.
 // Full template language: prompt / date / record.Prop / var.NAME / ref / tag /
 // include (recursion limit 3) / <%* async js %> with tp.* namespace + blocklist.
@@ -5,7 +11,7 @@
 // Trigger modes (append/update/collection/auto with loop guard), audit log,
 // status-bar quick-template, slash /tmpl, command palette, hot-reload disposal guard.
 
-console.log('%c[Templater] v2.49.2 loaded — lossless empty legacy-heading reconciliation.', 'color:#10b981;font-weight:bold');
+console.log('%c[Templater] v2.49.3 loaded — fleet caret-detection fix (U7b).', 'color:#10b981;font-weight:bold');
 const TEMPLATES_COLL = "Templates";
 const AUDIT_COLL_CANDIDATES = ["Template Log", "Template Applications"];
 const RECURSION_LIMIT = 3;
@@ -484,7 +490,7 @@ class Plugin extends AppPlugin {
       } catch (e) { return { error: String(e && e.message || e) }; }
     };
 
-    try { window.__TEMPLATER_VERSION = '2.49.2'; } catch (e) {}
+    try { window.__TEMPLATER_VERSION = '2.49.3'; } catch (e) {}
     console.log('[Templater] commands + slash + auto-apply + triggers engine registered.');
   }
 
@@ -1094,7 +1100,7 @@ class Plugin extends AppPlugin {
     const current = (api.getConfiguration && api.getConfiguration()) || (this.getConfiguration && this.getConfiguration()) || {};
     const custom = current.custom && typeof current.custom === 'object' ? current.custom : {};
     await api.saveConfiguration(Object.assign({}, current, {
-      version: '2.49.2',
+      version: '2.49.3',
       custom: Object.assign({}, custom, { [AUTO_TITLE_RULES_KEY]: rules })
     }));
   }
@@ -1161,7 +1167,7 @@ class Plugin extends AppPlugin {
     const current = (api.getConfiguration && api.getConfiguration()) || (this.getConfiguration && this.getConfiguration()) || {};
     const custom = current.custom && typeof current.custom === 'object' ? current.custom : {};
     await api.saveConfiguration(Object.assign({}, current, {
-      version: '2.49.2',
+      version: '2.49.3',
       custom: Object.assign({}, custom, patch || {})
     }));
   }
@@ -6148,13 +6154,42 @@ ${renderTemplaterAutoTitle.toString()}
     return adopted;
   }
 
+  // Three-tier caret-line GUID detection (U7 fleet fix — Thymer removed .listitem-with-caret):
+  //   Tier 1: window.g_item?.state?.guid  (new bundle; null until first interaction;
+  //           typeof null === 'object', so explicit !== null guard is required)
+  //   Tier 2: .listitem-with-caret[data-guid]  (legacy builds)
+  //   Tier 3: .flowythymer-thread-target closest [data-guid]  (last resort, can linger)
+  // Returns a guid string or null. Safe to call when document is undefined (SSR/test env).
+  _journalCaretLineGuid() {
+    if (typeof window === 'undefined') return null;
+    try {
+      const gi = window.g_item;
+      if (gi != null && gi.state && typeof gi.state.guid === 'string' && gi.state.guid) return gi.state.guid;
+    } catch (_e) {}
+    if (typeof document === 'undefined') return null;
+    try {
+      const el = document.querySelector('.listitem-with-caret[data-guid]');
+      if (el) { const g = el.getAttribute('data-guid'); if (g) return g; }
+    } catch (_e) {}
+    try {
+      const el = document.querySelector('.flowythymer-thread-target');
+      if (el) {
+        const closest = el.closest ? el.closest('[data-guid]') : null;
+        const g = closest && closest.getAttribute('data-guid');
+        if (g) return g;
+      }
+    } catch (_e) {}
+    return null;
+  }
+
   _journalCaretInside(guids) {
     if (typeof document === 'undefined' || !guids || !guids.size) return false;
+    // Fast path via shared three-tier helper.
+    const caretGuid = this._journalCaretLineGuid();
+    if (caretGuid && guids.has(caretGuid)) return true;
+    // Fallback: walk up from activeElement (handles edge cases where g_item is stale).
     const candidates = [];
     try { if (document.activeElement) candidates.push(document.activeElement); } catch (_e) {}
-    try {
-      for (const node of document.querySelectorAll('.flowythymer-thread-target,.listitem-with-caret')) candidates.push(node);
-    } catch (_e) {}
     for (const node of candidates) {
       let owner = node;
       try { owner = node && node.closest ? node.closest('[data-guid]') : node; } catch (_e) {}
